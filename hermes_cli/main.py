@@ -754,6 +754,18 @@ def cmd_chat(args):
     if getattr(args, "source", None):
         os.environ["HERMES_SESSION_SOURCE"] = args.source
 
+    query_file = str(getattr(args, "query_file", "") or "").strip()
+    if query_file:
+        if getattr(args, "query", None):
+            print("Error: use either --query or --query-file, not both", file=sys.stderr)
+            sys.exit(1)
+        query_path = Path(query_file).expanduser()
+        try:
+            args.query = query_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            print(f"Error: failed to read --query-file {query_path}: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     # Import and run the CLI
     from cli import main as cli_main
     
@@ -4933,6 +4945,10 @@ For more help on a command:
     chat_parser.add_argument(
         "-q", "--query",
         help="Single query (non-interactive mode)"
+    )
+    chat_parser.add_argument(
+        "--query-file",
+        help="Read a single query from a UTF-8 file to avoid shell/argv size limits"
     )
     chat_parser.add_argument(
         "--image",
