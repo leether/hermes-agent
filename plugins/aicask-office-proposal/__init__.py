@@ -13,6 +13,7 @@ SCHEMA_VERSION = "office-action-proposal-v1"
 PROPOSAL_FILENAME = "office_action_proposal.json"
 TOOL_NAME = "create_office_proposal"
 TOOLSET_NAME = "aicask-office"
+ARTIFACT_DIR_TAG_RE = re.compile(r"<artifact_dir>\s*(?P<path>.*?)\s*</artifact_dir>", re.DOTALL)
 
 
 CREATE_OFFICE_PROPOSAL_SCHEMA = {
@@ -55,11 +56,11 @@ def _json_ok(payload: Mapping[str, Any]) -> str:
     return json.dumps({"ok": True, **dict(payload)}, ensure_ascii=False)
 
 
-def _artifact_dir() -> Path | None:
-    raw = (os.getenv("HERMES_BRIDGE_ARTIFACT_DIR", "") or "").strip()
-    if not raw:
+def _resolve_dir(raw: str) -> Path | None:
+    text = (raw or "").strip()
+    if not text:
         return None
-    root = Path(raw).expanduser()
+    root = Path(text).expanduser()
     try:
         resolved = root.resolve()
     except OSError:
@@ -67,6 +68,43 @@ def _artifact_dir() -> Path | None:
     if not resolved.is_dir():
         return None
     return resolved
+
+
+def _artifact_root() -> Path | None:
+    root = _resolve_dir(os.getenv("HERMES_BRIDGE_ARTIFACT_ROOT", ""))
+    return root
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _artifact_dir_from_user_task(user_task: Any) -> Path | None:
+    text = str(user_task or "")
+    if not text:
+        return None
+    matches = ARTIFACT_DIR_TAG_RE.findall(text)
+    if not matches:
+        return None
+    candidate = _resolve_dir(matches[-1])
+    if candidate is None:
+        return None
+    root = _artifact_root()
+    if root is not None and not _path_is_within(candidate, root):
+        return None
+    return candidate
+
+
+def _artifact_dir(user_task: Any = None) -> Path | None:
+    raw = (os.getenv("HERMES_BRIDGE_ARTIFACT_DIR", "") or "").strip()
+    direct = _resolve_dir(raw)
+    if direct is not None:
+        return direct
+    return _artifact_dir_from_user_task(user_task)
 
 
 def _expected_template_family() -> str:
@@ -110,12 +148,14 @@ def _validate_content_spec(template_family: str, content_spec: Any) -> str:
     return ""
 
 
-def create_office_proposal(args: Mapping[str, Any] | None) -> str:
+def create_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str:
     """Validate and persist an Office action proposal for the current bridge turn."""
     params = dict(args or {})
-    root = _artifact_dir()
+    root = _artifact_dir(kwargs.get("user_task"))
     if root is None:
-        return _json_error("HERMES_BRIDGE_ARTIFACT_DIR is not configured or is not a directory")
+        return _json_error(
+            "HERMES_BRIDGE_ARTIFACT_DIR is not configured, and no safe bridge artifact_dir was found in the request context"
+        )
 
     template_family = str(params.get("template_family") or "").strip()
     if not template_family:
@@ -165,7 +205,7 @@ def register(ctx: Any) -> None:
         TOOL_NAME,
         TOOLSET_NAME,
         CREATE_OFFICE_PROPOSAL_SCHEMA,
-        lambda args, **kwargs: create_office_proposal(args),
+        lambda args, **kwargs: create_office_proposal(args, **kwargs),
         description="Create a validated Office action proposal for the WorkTool bridge.",
         emoji="📄",
     )

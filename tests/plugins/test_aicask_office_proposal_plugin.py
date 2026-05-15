@@ -75,11 +75,53 @@ def test_register_exposes_create_office_proposal_tool():
 def test_create_office_proposal_requires_artifact_dir(monkeypatch):
     module = load_plugin_module()
     monkeypatch.delenv("HERMES_BRIDGE_ARTIFACT_DIR", raising=False)
+    monkeypatch.delenv("HERMES_BRIDGE_ARTIFACT_ROOT", raising=False)
 
     result = json.loads(module.create_office_proposal(valid_args()))
 
     assert result["ok"] is False
     assert "HERMES_BRIDGE_ARTIFACT_DIR" in result["error"]
+
+
+def test_create_office_proposal_uses_safe_artifact_dir_from_user_task(tmp_path, monkeypatch):
+    module = load_plugin_module()
+    artifact_root = tmp_path / "artifacts" / "ai-public"
+    artifact_dir = artifact_root / "msg_123"
+    artifact_dir.mkdir(parents=True)
+    monkeypatch.delenv("HERMES_BRIDGE_ARTIFACT_DIR", raising=False)
+    monkeypatch.setenv("HERMES_BRIDGE_ARTIFACT_ROOT", str(artifact_root))
+    user_task = (
+        "<message_context>{}</message_context>\n"
+        f"<artifact_dir>\n{artifact_dir}\n</artifact_dir>\n"
+    )
+
+    result = json.loads(module.create_office_proposal(valid_args(), user_task=user_task))
+    proposal = json.loads((artifact_dir / "office_action_proposal.json").read_text(encoding="utf-8"))
+
+    assert result["ok"] is True
+    assert result["proposal_path"] == str(artifact_dir / "office_action_proposal.json")
+    assert proposal["output_filename_hint"] == "ai-public-tool-first-1.docx"
+
+
+def test_create_office_proposal_rejects_user_task_artifact_dir_outside_root(tmp_path, monkeypatch):
+    module = load_plugin_module()
+    artifact_root = tmp_path / "artifacts" / "ai-public"
+    artifact_root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.delenv("HERMES_BRIDGE_ARTIFACT_DIR", raising=False)
+    monkeypatch.setenv("HERMES_BRIDGE_ARTIFACT_ROOT", str(artifact_root))
+
+    result = json.loads(
+        module.create_office_proposal(
+            valid_args(),
+            user_task=f"<artifact_dir>\n{outside}\n</artifact_dir>\n",
+        )
+    )
+
+    assert result["ok"] is False
+    assert "artifact_dir" in result["error"]
+    assert not (outside / "office_action_proposal.json").exists()
 
 
 def test_create_office_proposal_rejects_template_mismatch(tmp_path, monkeypatch):
