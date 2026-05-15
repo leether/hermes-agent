@@ -11,7 +11,11 @@ from typing import Any, Mapping
 
 SCHEMA_VERSION = "office-action-proposal-v1"
 PROPOSAL_FILENAME = "office_action_proposal.json"
+STATE_FILENAME = ".office_action_proposal_state.json"
 TOOL_NAME = "create_office_proposal"
+START_TOOL_NAME = "start_office_proposal"
+APPEND_SECTION_TOOL_NAME = "append_office_proposal_section"
+FINISH_TOOL_NAME = "finish_office_proposal"
 TOOLSET_NAME = "aicask-office"
 ARTIFACT_DIR_TAG_RE = re.compile(r"<artifact_dir>\s*(?P<path>.*?)\s*</artifact_dir>", re.DOTALL)
 
@@ -45,6 +49,76 @@ CREATE_OFFICE_PROPOSAL_SCHEMA = {
         },
         "required": ["output_filename_hint", "template_family", "title", "content_spec"],
     },
+}
+
+START_OFFICE_PROPOSAL_SCHEMA = {
+    "name": START_TOOL_NAME,
+    "description": (
+        "Start a chunked structured Word proposal in the bridge artifact directory. "
+        "Use this for long Word documents so the full document body is not placed "
+        "inside one large tool call."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "output_filename_hint": {
+                "type": "string",
+                "description": "Output file name only, with .docx extension. Do not include a path.",
+            },
+            "template_family": {
+                "type": "string",
+                "description": "Must be structured_docx_v1.",
+            },
+            "title": {"type": "string", "description": "Document title."},
+            "subtitle": {"type": "string", "description": "Optional subtitle."},
+            "summary": {"type": "string", "description": "Optional short document summary."},
+        },
+        "required": ["output_filename_hint", "template_family", "title"],
+    },
+}
+
+APPEND_OFFICE_SECTION_SCHEMA = {
+    "name": APPEND_SECTION_TOOL_NAME,
+    "description": (
+        "Append one section to a chunked structured Word proposal. Keep each call "
+        "small; for long chapters, split the chapter into multiple sections."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "heading": {"type": "string", "description": "Section heading."},
+            "paragraphs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Paragraphs for this section.",
+            },
+            "bullets": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional bullet list items.",
+            },
+            "numbered": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional numbered list items.",
+            },
+            "tables": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Optional simple tables with title, headers, rows.",
+            },
+        },
+        "required": ["heading"],
+    },
+}
+
+FINISH_OFFICE_PROPOSAL_SCHEMA = {
+    "name": FINISH_TOOL_NAME,
+    "description": (
+        "Finalize a chunked structured Word proposal by copying the accumulated "
+        "state to office_action_proposal.json."
+    ),
+    "parameters": {"type": "object", "properties": {}},
 }
 
 
@@ -148,6 +222,43 @@ def _validate_content_spec(template_family: str, content_spec: Any) -> str:
     return ""
 
 
+def _validate_docx_section(section: Any) -> str:
+    if not isinstance(section, dict):
+        return "section must be an object"
+    if not str(section.get("heading") or "").strip():
+        return "section heading is required"
+    has_content = any(
+        isinstance(section.get(key), list) and section.get(key)
+        for key in ("paragraphs", "bullets", "numbered", "tables")
+    )
+    if not has_content:
+        return "section must contain paragraphs, bullets, numbered, or tables"
+    return ""
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _state_path(root: Path) -> Path:
+    return root / STATE_FILENAME
+
+
+def _load_state(root: Path) -> tuple[dict[str, Any], str]:
+    state_path = _state_path(root)
+    if not state_path.is_file():
+        return {}, "office proposal state is missing"
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {}, f"office proposal state is not valid json: {exc}"
+    if not isinstance(payload, dict):
+        return {}, "office proposal state root must be an object"
+    return payload, ""
+
+
 def create_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str:
     """Validate and persist an Office action proposal for the current bridge turn."""
     params = dict(args or {})
@@ -186,9 +297,7 @@ def create_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str
         "content_spec": content_spec,
     }
     proposal_path = root / PROPOSAL_FILENAME
-    tmp_path = root / f".{PROPOSAL_FILENAME}.tmp"
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(proposal_path)
+    _write_json_atomic(proposal_path, payload)
     return _json_ok(
         {
             "schema_version": SCHEMA_VERSION,
@@ -196,6 +305,120 @@ def create_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str
             "proposal_filename": PROPOSAL_FILENAME,
             "template_family": template_family,
             "output_filename_hint": filename,
+        }
+    )
+
+
+def start_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str:
+    params = dict(args or {})
+    root = _artifact_dir(kwargs.get("user_task"))
+    if root is None:
+        return _json_error(
+            "HERMES_BRIDGE_ARTIFACT_DIR is not configured, and no safe bridge artifact_dir was found in the request context"
+        )
+
+    template_family = str(params.get("template_family") or "").strip()
+    if template_family != "structured_docx_v1":
+        return _json_error("chunked office proposal currently supports structured_docx_v1 only")
+    expected_family = _expected_template_family()
+    if expected_family and template_family != expected_family:
+        return _json_error(f"template_family must be {expected_family}")
+
+    filename, filename_error = _safe_filename(params.get("output_filename_hint"))
+    if filename_error:
+        return _json_error(filename_error)
+    if not filename.lower().endswith(".docx"):
+        return _json_error("output_filename_hint must end with .docx for structured_docx_v1")
+
+    title = str(params.get("title") or "").strip()
+    if not title:
+        return _json_error("title is required")
+
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "action": "fill_template",
+        "output_filename_hint": filename,
+        "template_family": template_family,
+        "title": title,
+        "content_spec": {
+            "subtitle": str(params.get("subtitle") or "").strip(),
+            "summary": str(params.get("summary") or "").strip(),
+            "sections": [],
+        },
+    }
+    _write_json_atomic(_state_path(root), payload)
+    return _json_ok(
+        {
+            "state_filename": STATE_FILENAME,
+            "template_family": template_family,
+            "output_filename_hint": filename,
+            "section_count": 0,
+        }
+    )
+
+
+def append_office_proposal_section(args: Mapping[str, Any] | None, **kwargs: Any) -> str:
+    params = dict(args or {})
+    root = _artifact_dir(kwargs.get("user_task"))
+    if root is None:
+        return _json_error(
+            "HERMES_BRIDGE_ARTIFACT_DIR is not configured, and no safe bridge artifact_dir was found in the request context"
+        )
+    state, state_error = _load_state(root)
+    if state_error:
+        return _json_error(state_error)
+    if str(state.get("template_family") or "").strip() != "structured_docx_v1":
+        return _json_error("office proposal state is not structured_docx_v1")
+
+    section = {
+        "heading": str(params.get("heading") or "").strip(),
+        "paragraphs": params.get("paragraphs") or [],
+        "bullets": params.get("bullets") or [],
+        "numbered": params.get("numbered") or [],
+        "tables": params.get("tables") or [],
+    }
+    section_error = _validate_docx_section(section)
+    if section_error:
+        return _json_error(section_error)
+
+    content_spec = state.get("content_spec")
+    if not isinstance(content_spec, dict):
+        return _json_error("office proposal state content_spec must be an object")
+    sections = content_spec.get("sections")
+    if not isinstance(sections, list):
+        return _json_error("office proposal state content_spec.sections must be an array")
+    if len(sections) >= 12:
+        return _json_error("structured_docx_v1 supports at most 12 sections")
+    sections.append(section)
+    _write_json_atomic(_state_path(root), state)
+    return _json_ok({"state_filename": STATE_FILENAME, "section_count": len(sections)})
+
+
+def finish_office_proposal(args: Mapping[str, Any] | None = None, **kwargs: Any) -> str:
+    root = _artifact_dir(kwargs.get("user_task"))
+    if root is None:
+        return _json_error(
+            "HERMES_BRIDGE_ARTIFACT_DIR is not configured, and no safe bridge artifact_dir was found in the request context"
+        )
+    state, state_error = _load_state(root)
+    if state_error:
+        return _json_error(state_error)
+    template_family = str(state.get("template_family") or "").strip()
+    content_error = _validate_content_spec(template_family, state.get("content_spec"))
+    if content_error:
+        return _json_error(content_error)
+
+    proposal_path = root / PROPOSAL_FILENAME
+    _write_json_atomic(proposal_path, state)
+    section_count = len((state.get("content_spec") or {}).get("sections") or [])
+    return _json_ok(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "proposal_path": str(proposal_path),
+            "proposal_filename": PROPOSAL_FILENAME,
+            "template_family": template_family,
+            "output_filename_hint": str(state.get("output_filename_hint") or "").strip(),
+            "section_count": section_count,
         }
     )
 
@@ -208,4 +431,28 @@ def register(ctx: Any) -> None:
         lambda args, **kwargs: create_office_proposal(args, **kwargs),
         description="Create a validated Office action proposal for the WorkTool bridge.",
         emoji="📄",
+    )
+    ctx.register_tool(
+        START_TOOL_NAME,
+        TOOLSET_NAME,
+        START_OFFICE_PROPOSAL_SCHEMA,
+        lambda args, **kwargs: start_office_proposal(args, **kwargs),
+        description="Start a chunked Office proposal for long structured Word documents.",
+        emoji="📝",
+    )
+    ctx.register_tool(
+        APPEND_SECTION_TOOL_NAME,
+        TOOLSET_NAME,
+        APPEND_OFFICE_SECTION_SCHEMA,
+        lambda args, **kwargs: append_office_proposal_section(args, **kwargs),
+        description="Append one section to a chunked structured Word proposal.",
+        emoji="➕",
+    )
+    ctx.register_tool(
+        FINISH_TOOL_NAME,
+        TOOLSET_NAME,
+        FINISH_OFFICE_PROPOSAL_SCHEMA,
+        lambda args, **kwargs: finish_office_proposal(args, **kwargs),
+        description="Finalize a chunked structured Word proposal.",
+        emoji="✅",
     )
