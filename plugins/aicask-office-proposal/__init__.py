@@ -34,6 +34,13 @@ CREATE_OFFICE_PROPOSAL_SCHEMA = {
                 "type": "string",
                 "description": "Output file name only, with .docx or .xlsx extension. Do not include a path.",
             },
+            "artifact_dir": {
+                "type": "string",
+                "description": (
+                    "Bridge-provided artifact directory copied exactly from the request context. "
+                    "Required when HERMES_BRIDGE_ARTIFACT_DIR is not set."
+                ),
+            },
             "template_family": {
                 "type": "string",
                 "description": "Bridge-selected template family, for example structured_docx_v1.",
@@ -47,7 +54,7 @@ CREATE_OFFICE_PROPOSAL_SCHEMA = {
                 "description": "Template-specific content object.",
             },
         },
-        "required": ["output_filename_hint", "template_family", "title", "content_spec"],
+        "required": ["output_filename_hint", "artifact_dir", "template_family", "title", "content_spec"],
     },
 }
 
@@ -65,6 +72,10 @@ START_OFFICE_PROPOSAL_SCHEMA = {
                 "type": "string",
                 "description": "Output file name only, with .docx extension. Do not include a path.",
             },
+            "artifact_dir": {
+                "type": "string",
+                "description": "Bridge-provided artifact directory copied exactly from the request context.",
+            },
             "template_family": {
                 "type": "string",
                 "description": "Must be structured_docx_v1.",
@@ -73,7 +84,7 @@ START_OFFICE_PROPOSAL_SCHEMA = {
             "subtitle": {"type": "string", "description": "Optional subtitle."},
             "summary": {"type": "string", "description": "Optional short document summary."},
         },
-        "required": ["output_filename_hint", "template_family", "title"],
+        "required": ["output_filename_hint", "artifact_dir", "template_family", "title"],
     },
 }
 
@@ -87,6 +98,10 @@ APPEND_OFFICE_SECTION_SCHEMA = {
         "type": "object",
         "properties": {
             "heading": {"type": "string", "description": "Section heading."},
+            "artifact_dir": {
+                "type": "string",
+                "description": "Bridge-provided artifact directory copied exactly from the request context.",
+            },
             "paragraphs": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -108,7 +123,7 @@ APPEND_OFFICE_SECTION_SCHEMA = {
                 "description": "Optional simple tables with title, headers, rows.",
             },
         },
-        "required": ["heading"],
+        "required": ["heading", "artifact_dir"],
     },
 }
 
@@ -118,7 +133,16 @@ FINISH_OFFICE_PROPOSAL_SCHEMA = {
         "Finalize a chunked structured Word proposal by copying the accumulated "
         "state to office_action_proposal.json."
     ),
-    "parameters": {"type": "object", "properties": {}},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "artifact_dir": {
+                "type": "string",
+                "description": "Bridge-provided artifact directory copied exactly from the request context.",
+            },
+        },
+        "required": ["artifact_dir"],
+    },
 }
 
 
@@ -173,11 +197,26 @@ def _artifact_dir_from_user_task(user_task: Any) -> Path | None:
     return candidate
 
 
-def _artifact_dir(user_task: Any = None) -> Path | None:
+def _artifact_dir_from_tool_args(args: Mapping[str, Any] | None) -> Path | None:
+    if not isinstance(args, Mapping):
+        return None
+    candidate = _resolve_dir(str(args.get("artifact_dir") or ""))
+    if candidate is None:
+        return None
+    root = _artifact_root()
+    if root is not None and not _path_is_within(candidate, root):
+        return None
+    return candidate
+
+
+def _artifact_dir(user_task: Any = None, args: Mapping[str, Any] | None = None) -> Path | None:
     raw = (os.getenv("HERMES_BRIDGE_ARTIFACT_DIR", "") or "").strip()
     direct = _resolve_dir(raw)
     if direct is not None:
         return direct
+    from_args = _artifact_dir_from_tool_args(args)
+    if from_args is not None:
+        return from_args
     return _artifact_dir_from_user_task(user_task)
 
 
@@ -262,7 +301,7 @@ def _load_state(root: Path) -> tuple[dict[str, Any], str]:
 def create_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str:
     """Validate and persist an Office action proposal for the current bridge turn."""
     params = dict(args or {})
-    root = _artifact_dir(kwargs.get("user_task"))
+    root = _artifact_dir(kwargs.get("user_task"), params)
     if root is None:
         return _json_error(
             "HERMES_BRIDGE_ARTIFACT_DIR is not configured, and no safe bridge artifact_dir was found in the request context"
@@ -311,7 +350,7 @@ def create_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str
 
 def start_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str:
     params = dict(args or {})
-    root = _artifact_dir(kwargs.get("user_task"))
+    root = _artifact_dir(kwargs.get("user_task"), params)
     if root is None:
         return _json_error(
             "HERMES_BRIDGE_ARTIFACT_DIR is not configured, and no safe bridge artifact_dir was found in the request context"
@@ -359,7 +398,7 @@ def start_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str:
 
 def append_office_proposal_section(args: Mapping[str, Any] | None, **kwargs: Any) -> str:
     params = dict(args or {})
-    root = _artifact_dir(kwargs.get("user_task"))
+    root = _artifact_dir(kwargs.get("user_task"), params)
     if root is None:
         return _json_error(
             "HERMES_BRIDGE_ARTIFACT_DIR is not configured, and no safe bridge artifact_dir was found in the request context"
@@ -395,7 +434,8 @@ def append_office_proposal_section(args: Mapping[str, Any] | None, **kwargs: Any
 
 
 def finish_office_proposal(args: Mapping[str, Any] | None = None, **kwargs: Any) -> str:
-    root = _artifact_dir(kwargs.get("user_task"))
+    params = dict(args or {})
+    root = _artifact_dir(kwargs.get("user_task"), params)
     if root is None:
         return _json_error(
             "HERMES_BRIDGE_ARTIFACT_DIR is not configured, and no safe bridge artifact_dir was found in the request context"

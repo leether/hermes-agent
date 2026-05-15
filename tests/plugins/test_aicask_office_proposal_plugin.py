@@ -72,6 +72,7 @@ def test_register_exposes_create_office_proposal_tool():
     assert create_tool["toolset"] == "aicask-office"
     assert create_tool["schema"]["parameters"]["required"] == [
         "output_filename_hint",
+        "artifact_dir",
         "template_family",
         "title",
         "content_spec",
@@ -110,6 +111,24 @@ def test_create_office_proposal_uses_safe_artifact_dir_from_user_task(tmp_path, 
     assert proposal["output_filename_hint"] == "ai-public-tool-first-1.docx"
 
 
+def test_create_office_proposal_uses_safe_artifact_dir_from_tool_args(tmp_path, monkeypatch):
+    module = load_plugin_module()
+    artifact_root = tmp_path / "artifacts" / "ai-public"
+    artifact_dir = artifact_root / "msg_123"
+    artifact_dir.mkdir(parents=True)
+    monkeypatch.delenv("HERMES_BRIDGE_ARTIFACT_DIR", raising=False)
+    monkeypatch.setenv("HERMES_BRIDGE_ARTIFACT_ROOT", str(artifact_root))
+    args = valid_args()
+    args["artifact_dir"] = str(artifact_dir)
+
+    result = json.loads(module.create_office_proposal(args))
+    proposal = json.loads((artifact_dir / "office_action_proposal.json").read_text(encoding="utf-8"))
+
+    assert result["ok"] is True
+    assert result["proposal_path"] == str(artifact_dir / "office_action_proposal.json")
+    assert proposal["output_filename_hint"] == "ai-public-tool-first-1.docx"
+
+
 def test_create_office_proposal_rejects_user_task_artifact_dir_outside_root(tmp_path, monkeypatch):
     module = load_plugin_module()
     artifact_root = tmp_path / "artifacts" / "ai-public"
@@ -125,6 +144,24 @@ def test_create_office_proposal_rejects_user_task_artifact_dir_outside_root(tmp_
             user_task=f"<artifact_dir>\n{outside}\n</artifact_dir>\n",
         )
     )
+
+    assert result["ok"] is False
+    assert "artifact_dir" in result["error"]
+    assert not (outside / "office_action_proposal.json").exists()
+
+
+def test_create_office_proposal_rejects_tool_arg_artifact_dir_outside_root(tmp_path, monkeypatch):
+    module = load_plugin_module()
+    artifact_root = tmp_path / "artifacts" / "ai-public"
+    artifact_root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.delenv("HERMES_BRIDGE_ARTIFACT_DIR", raising=False)
+    monkeypatch.setenv("HERMES_BRIDGE_ARTIFACT_ROOT", str(artifact_root))
+    args = valid_args()
+    args["artifact_dir"] = str(outside)
+
+    result = json.loads(module.create_office_proposal(args))
 
     assert result["ok"] is False
     assert "artifact_dir" in result["error"]
@@ -160,13 +197,18 @@ def test_create_office_proposal_rejects_path_traversal(tmp_path, monkeypatch):
 
 def test_chunked_office_proposal_writes_state_then_final_proposal(tmp_path, monkeypatch):
     module = load_plugin_module()
-    monkeypatch.setenv("HERMES_BRIDGE_ARTIFACT_DIR", str(tmp_path))
+    artifact_root = tmp_path / "artifacts" / "ai-public"
+    artifact_dir = artifact_root / "msg_123"
+    artifact_dir.mkdir(parents=True)
+    monkeypatch.delenv("HERMES_BRIDGE_ARTIFACT_DIR", raising=False)
+    monkeypatch.setenv("HERMES_BRIDGE_ARTIFACT_ROOT", str(artifact_root))
     monkeypatch.setenv("HERMES_BRIDGE_OFFICE_TEMPLATE_FAMILY", "structured_docx_v1")
 
     start = json.loads(
         module.start_office_proposal(
             {
                 "output_filename_hint": "chunked-doc.docx",
+                "artifact_dir": str(artifact_dir),
                 "template_family": "structured_docx_v1",
                 "title": "Chunked Doc",
                 "summary": "Chunked proposal write",
@@ -177,13 +219,14 @@ def test_chunked_office_proposal_writes_state_then_final_proposal(tmp_path, monk
         module.append_office_proposal_section(
             {
                 "heading": "Part 1",
+                "artifact_dir": str(artifact_dir),
                 "paragraphs": ["A chunked section avoids one oversized tool call."],
             }
         )
     )
-    finish = json.loads(module.finish_office_proposal({}))
-    state = json.loads((tmp_path / ".office_action_proposal_state.json").read_text(encoding="utf-8"))
-    proposal = json.loads((tmp_path / "office_action_proposal.json").read_text(encoding="utf-8"))
+    finish = json.loads(module.finish_office_proposal({"artifact_dir": str(artifact_dir)}))
+    state = json.loads((artifact_dir / ".office_action_proposal_state.json").read_text(encoding="utf-8"))
+    proposal = json.loads((artifact_dir / "office_action_proposal.json").read_text(encoding="utf-8"))
 
     assert start["ok"] is True
     assert append["ok"] is True
