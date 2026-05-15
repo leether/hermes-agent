@@ -257,3 +257,21 @@ def test_finish_office_proposal_rejects_empty_state(tmp_path, monkeypatch):
     assert result["ok"] is False
     assert "sections" in result["error"]
     assert not (tmp_path / "office_action_proposal.json").exists()
+
+
+def test_create_office_proposal_accepts_scalar_docx_text_items(tmp_path, monkeypatch):
+    module = load_plugin_module()
+    monkeypatch.setenv("HERMES_BRIDGE_ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setenv("HERMES_BRIDGE_OFFICE_TEMPLATE_FAMILY", "structured_docx_v1")
+    args = valid_args()
+    args["content_spec"]["sections"] = [
+        {
+            "heading": "Numbered",
+            "numbered": "One scalar item should be tolerated by the controlled backend canonicalizer.",
+        }
+    ]
+
+    result = json.loads(module.create_office_proposal(args))
+
+    assert result["ok"] is True
+    assert (tmp_path / "office_action_proposal.json").is_file()

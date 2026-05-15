@@ -253,8 +253,11 @@ def _validate_content_spec(template_family: str, content_spec: Any) -> str:
             if not str(section.get("heading") or "").strip():
                 return f"section {index} heading is required"
             has_content = any(
-                isinstance(section.get(key), list) and section.get(key)
-                for key in ("paragraphs", "bullets", "numbered", "tables")
+                (isinstance(section.get(key), list) and section.get(key))
+                or (isinstance(section.get(key), (str, int, float, bool)) and str(section.get(key) or "").strip())
+                for key in ("paragraphs", "bullets", "numbered")
+            ) or (
+                isinstance(section.get("tables"), list) and section.get("tables")
             )
             if not has_content:
                 return f"section {index} must contain paragraphs, bullets, numbered, or tables"
@@ -267,8 +270,11 @@ def _validate_docx_section(section: Any) -> str:
     if not str(section.get("heading") or "").strip():
         return "section heading is required"
     has_content = any(
-        isinstance(section.get(key), list) and section.get(key)
-        for key in ("paragraphs", "bullets", "numbered", "tables")
+        (isinstance(section.get(key), list) and section.get(key))
+        or (isinstance(section.get(key), (str, int, float, bool)) and str(section.get(key) or "").strip())
+        for key in ("paragraphs", "bullets", "numbered")
+    ) or (
+        isinstance(section.get("tables"), list) and section.get("tables")
     )
     if not has_content:
         return "section must contain paragraphs, bullets, numbered, or tables"
