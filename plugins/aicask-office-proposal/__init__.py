@@ -85,6 +85,7 @@ START_OFFICE_PROPOSAL_SCHEMA = {
             "summary": {"type": "string", "description": "Optional short document summary."},
         },
         "required": ["output_filename_hint", "artifact_dir", "template_family", "title"],
+        "additionalProperties": False,
     },
 }
 
@@ -124,6 +125,7 @@ APPEND_OFFICE_SECTION_SCHEMA = {
             },
         },
         "required": ["heading", "artifact_dir"],
+        "additionalProperties": False,
     },
 }
 
@@ -142,8 +144,25 @@ FINISH_OFFICE_PROPOSAL_SCHEMA = {
             },
         },
         "required": ["artifact_dir"],
+        "additionalProperties": False,
     },
 }
+
+
+START_OFFICE_PROPOSAL_ALLOWED_KEYS = frozenset(
+    {
+        "output_filename_hint",
+        "artifact_dir",
+        "template_family",
+        "title",
+        "subtitle",
+        "summary",
+    }
+)
+APPEND_OFFICE_SECTION_ALLOWED_KEYS = frozenset(
+    {"heading", "artifact_dir", "paragraphs", "bullets", "numbered", "tables"}
+)
+FINISH_OFFICE_PROPOSAL_ALLOWED_KEYS = frozenset({"artifact_dir"})
 
 
 def _json_error(message: str) -> str:
@@ -152,6 +171,13 @@ def _json_error(message: str) -> str:
 
 def _json_ok(payload: Mapping[str, Any]) -> str:
     return json.dumps({"ok": True, **dict(payload)}, ensure_ascii=False)
+
+
+def _unsupported_fields_error(tool_name: str, params: Mapping[str, Any], allowed_keys: frozenset[str]) -> str:
+    unsupported = sorted(str(key) for key in params.keys() if str(key) not in allowed_keys)
+    if not unsupported:
+        return ""
+    return f"{tool_name} does not accept field(s): {', '.join(unsupported)}"
 
 
 def _resolve_dir(raw: str) -> Path | None:
@@ -356,6 +382,13 @@ def create_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str
 
 def start_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str:
     params = dict(args or {})
+    unsupported_fields_error = _unsupported_fields_error(
+        START_TOOL_NAME,
+        params,
+        START_OFFICE_PROPOSAL_ALLOWED_KEYS,
+    )
+    if unsupported_fields_error:
+        return _json_error(unsupported_fields_error)
     root = _artifact_dir(kwargs.get("user_task"), params)
     if root is None:
         return _json_error(
@@ -404,6 +437,13 @@ def start_office_proposal(args: Mapping[str, Any] | None, **kwargs: Any) -> str:
 
 def append_office_proposal_section(args: Mapping[str, Any] | None, **kwargs: Any) -> str:
     params = dict(args or {})
+    unsupported_fields_error = _unsupported_fields_error(
+        APPEND_SECTION_TOOL_NAME,
+        params,
+        APPEND_OFFICE_SECTION_ALLOWED_KEYS,
+    )
+    if unsupported_fields_error:
+        return _json_error(unsupported_fields_error)
     root = _artifact_dir(kwargs.get("user_task"), params)
     if root is None:
         return _json_error(
@@ -441,6 +481,13 @@ def append_office_proposal_section(args: Mapping[str, Any] | None, **kwargs: Any
 
 def finish_office_proposal(args: Mapping[str, Any] | None = None, **kwargs: Any) -> str:
     params = dict(args or {})
+    unsupported_fields_error = _unsupported_fields_error(
+        FINISH_TOOL_NAME,
+        params,
+        FINISH_OFFICE_PROPOSAL_ALLOWED_KEYS,
+    )
+    if unsupported_fields_error:
+        return _json_error(unsupported_fields_error)
     root = _artifact_dir(kwargs.get("user_task"), params)
     if root is None:
         return _json_error(
@@ -470,14 +517,6 @@ def finish_office_proposal(args: Mapping[str, Any] | None = None, **kwargs: Any)
 
 
 def register(ctx: Any) -> None:
-    ctx.register_tool(
-        TOOL_NAME,
-        TOOLSET_NAME,
-        CREATE_OFFICE_PROPOSAL_SCHEMA,
-        lambda args, **kwargs: create_office_proposal(args, **kwargs),
-        description="Create a validated Office action proposal for the WorkTool bridge.",
-        emoji="📄",
-    )
     ctx.register_tool(
         START_TOOL_NAME,
         TOOLSET_NAME,

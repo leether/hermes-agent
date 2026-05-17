@@ -47,7 +47,7 @@ def test_create_office_proposal_writes_valid_file(tmp_path, monkeypatch):
     assert proposal["output_filename_hint"] == "ai-public-tool-first-1.docx"
 
 
-def test_register_exposes_create_office_proposal_tool():
+def test_register_exposes_chunked_office_proposal_tools_only():
     module = load_plugin_module()
     registered = {}
 
@@ -63,21 +63,20 @@ def test_register_exposes_create_office_proposal_tool():
     module.register(FakeContext())
 
     assert set(registered) == {
-        "create_office_proposal",
         "start_office_proposal",
         "append_office_proposal_section",
         "finish_office_proposal",
     }
-    create_tool = registered["create_office_proposal"]
-    assert create_tool["toolset"] == "aicask-office"
-    assert create_tool["schema"]["parameters"]["required"] == [
+    start_tool = registered["start_office_proposal"]
+    assert start_tool["toolset"] == "aicask-office"
+    assert start_tool["schema"]["parameters"]["required"] == [
         "output_filename_hint",
         "artifact_dir",
         "template_family",
         "title",
-        "content_spec",
     ]
-    assert callable(create_tool["handler"])
+    assert start_tool["schema"]["parameters"]["additionalProperties"] is False
+    assert callable(start_tool["handler"])
 
 
 def test_create_office_proposal_requires_artifact_dir(monkeypatch):
@@ -237,6 +236,60 @@ def test_chunked_office_proposal_writes_state_then_final_proposal(tmp_path, monk
     assert proposal["content_spec"]["sections"][0]["paragraphs"] == [
         "A chunked section avoids one oversized tool call."
     ]
+
+
+def test_start_office_proposal_rejects_nested_content_spec(tmp_path, monkeypatch):
+    module = load_plugin_module()
+    monkeypatch.setenv("HERMES_BRIDGE_ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setenv("HERMES_BRIDGE_OFFICE_TEMPLATE_FAMILY", "structured_docx_v1")
+
+    result = json.loads(
+        module.start_office_proposal(
+            {
+                "output_filename_hint": "bad-start.docx",
+                "template_family": "structured_docx_v1",
+                "title": "Bad Start",
+                "content_spec": {"sections": [{"heading": "One", "paragraphs": ["Wrong field."]}]},
+            }
+        )
+    )
+
+    assert result["ok"] is False
+    assert "content_spec" in result["error"]
+    assert not (tmp_path / ".office_action_proposal_state.json").exists()
+
+
+def test_append_office_proposal_section_rejects_nested_content_spec(tmp_path, monkeypatch):
+    module = load_plugin_module()
+    monkeypatch.setenv("HERMES_BRIDGE_ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setenv("HERMES_BRIDGE_OFFICE_TEMPLATE_FAMILY", "structured_docx_v1")
+    start = json.loads(
+        module.start_office_proposal(
+            {
+                "output_filename_hint": "bad-append.docx",
+                "template_family": "structured_docx_v1",
+                "title": "Bad Append",
+            }
+        )
+    )
+    assert start["ok"] is True
+
+    result = json.loads(
+        module.append_office_proposal_section(
+            {
+                "artifact_dir": str(tmp_path),
+                "content_spec": {
+                    "heading": "One",
+                    "paragraphs": ["The section must be top-level tool args, not nested."],
+                },
+            }
+        )
+    )
+    state = json.loads((tmp_path / ".office_action_proposal_state.json").read_text(encoding="utf-8"))
+
+    assert result["ok"] is False
+    assert "content_spec" in result["error"]
+    assert state["content_spec"]["sections"] == []
 
 
 def test_finish_office_proposal_rejects_empty_state(tmp_path, monkeypatch):

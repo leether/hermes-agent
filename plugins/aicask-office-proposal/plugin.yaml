@@ -1,5 +1,7 @@
 name: aicask-office-proposal
 version: "1.0.0"
-description: Domain tool for writing WorkTool bridge Office action proposals.
+description: Domain tools for writing chunked WorkTool bridge Word action proposals.
 provides_tools:
-  - create_office_proposal
+  - start_office_proposal
+  - append_office_proposal_section
+  - finish_office_proposal
