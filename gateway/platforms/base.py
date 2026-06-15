@@ -827,6 +827,7 @@ def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
 
 DOCUMENT_CACHE_DIR = get_hermes_dir("cache/documents", "document_cache")
 SCREENSHOT_CACHE_DIR = get_hermes_dir("cache/screenshots", "browser_screenshots")
+DOCUMENT_CACHE_BASENAME_MAX_BYTES = 240
 _HERMES_HOME = get_hermes_home()
 _HERMES_ROOT = get_default_hermes_root()
 MEDIA_DELIVERY_ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
@@ -1237,6 +1238,35 @@ def get_document_cache_dir() -> Path:
     return DOCUMENT_CACHE_DIR
 
 
+def _prefix_within_utf8_limit(value: str, limit: int) -> str:
+    if len(value.encode("utf-8")) <= limit:
+        return value
+    result = []
+    used = 0
+    for char in value:
+        encoded = char.encode("utf-8")
+        if used + len(encoded) > limit:
+            break
+        result.append(char)
+        used += len(encoded)
+    return "".join(result)
+
+
+def _limit_filename_utf8_bytes(filename: str, max_bytes: int = DOCUMENT_CACHE_BASENAME_MAX_BYTES) -> str:
+    if len(filename.encode("utf-8")) <= max_bytes:
+        return filename
+
+    suffix = Path(filename).suffix
+    suffix_bytes = len(suffix.encode("utf-8"))
+    if suffix and suffix_bytes < max_bytes:
+        stem_budget = max_bytes - suffix_bytes
+        stem = filename[: -len(suffix)]
+        limited_stem = _prefix_within_utf8_limit(stem, stem_budget).rstrip(" .")
+        return f"{limited_stem or 'document'}{suffix}"
+
+    return _prefix_within_utf8_limit(filename, max_bytes).rstrip(" .") or "document"
+
+
 def cache_document_from_bytes(data: bytes, filename: str) -> str:
     """
     Save raw document bytes to the cache and return the absolute file path.
@@ -1261,6 +1291,7 @@ def cache_document_from_bytes(data: bytes, filename: str) -> str:
     if not safe_name or safe_name in {".", ".."}:
         safe_name = "document"
     cached_name = f"doc_{uuid.uuid4().hex[:12]}_{safe_name}"
+    cached_name = _limit_filename_utf8_bytes(cached_name)
     filepath = cache_dir / cached_name
     # Final safety check: ensure path stays inside cache dir
     if not filepath.resolve().is_relative_to(cache_dir.resolve()):

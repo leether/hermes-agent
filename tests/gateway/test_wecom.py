@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -374,9 +375,10 @@ class TestMediaHelpers:
         encryptor = Cipher(algorithms.AES(key), modes.CBC(key[:16])).encryptor()
         encrypted = encryptor.update(padded) + encryptor.finalize()
 
-        decrypted = WeComAdapter._decrypt_file_bytes(encrypted, base64.b64encode(key).decode("ascii"))
+        for aes_key in (base64.b64encode(key).decode("ascii"), key.hex()):
+            decrypted = WeComAdapter._decrypt_file_bytes(encrypted, aes_key)
 
-        assert decrypted == plaintext
+            assert decrypted == plaintext
 
     @pytest.mark.asyncio
     async def test_load_outbound_media_rejects_placeholder_path(self):
@@ -494,7 +496,7 @@ class TestMediaUpload:
             "file",
             {
                 "url": "https://example.com/secret.bin",
-                "aeskey": base64.b64encode(key).decode("ascii"),
+                "aeskey": key.hex(),
             },
         )
 
@@ -585,6 +587,158 @@ class TestSend:
 
 
 class TestInboundMessages:
+    @pytest.mark.asyncio
+    async def test_extract_media_collects_mixed_file(self, monkeypatch):
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        calls = []
+
+        async def fake_cache(kind, ref, *, source=""):
+            calls.append((kind, source, dict(ref)))
+            return f"/tmp/{source.replace('.', '_')}", "application/pdf"
+
+        monkeypatch.setattr(adapter, "_cache_media", fake_cache)
+
+        paths, types = await adapter._extract_media(
+            {
+                "msgtype": "mixed",
+                "mixed": {
+                    "msg_item": [
+                        {"msgtype": "text", "text": {"content": "see file"}},
+                        {
+                            "msgtype": "file",
+                            "file": {
+                                "url": "https://example.com/document",
+                                "aeskey": "redacted",
+                            },
+                        },
+                    ]
+                },
+            }
+        )
+
+        assert paths == ["/tmp/body_mixed[1]_file"]
+        assert types == ["application/pdf"]
+        assert calls == [
+            (
+                "file",
+                "body.mixed[1].file",
+                {"url": "https://example.com/document", "aeskey": "redacted"},
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_extract_media_collects_quoted_mixed_file(self, monkeypatch):
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        calls = []
+
+        async def fake_cache(kind, ref, *, source=""):
+            calls.append((kind, source, dict(ref)))
+            return f"/tmp/{source.replace('.', '_')}", "application/pdf"
+
+        monkeypatch.setattr(adapter, "_cache_media", fake_cache)
+
+        paths, types = await adapter._extract_media(
+            {
+                "msgtype": "text",
+                "text": {"content": "看看上面这个文件"},
+                "quote": {
+                    "msgtype": "mixed",
+                    "mixed": {
+                        "msg_item": [
+                            {
+                                "msgtype": "file",
+                                "file": {
+                                    "url": "https://example.com/quoted-doc",
+                                    "aeskey": "redacted",
+                                },
+                            }
+                        ]
+                    },
+                },
+            }
+        )
+
+        assert paths == ["/tmp/quote_mixed[0]_file"]
+        assert types == ["application/pdf"]
+        assert calls == [
+            (
+                "file",
+                "quote.mixed[0].file",
+                {"url": "https://example.com/quoted-doc", "aeskey": "redacted"},
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_extract_media_logs_no_url_metadata_without_secret_values(self, caplog):
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        caplog.set_level(logging.INFO, logger="gateway.platforms.wecom")
+
+        paths, types = await adapter._extract_media(
+            {
+                "msgtype": "file",
+                "chattype": "single",
+                "file": {
+                    "media_id": "media-id-value",
+                    "aeskey": "secret-aes-value",
+                },
+            }
+        )
+
+        assert paths == []
+        assert types == []
+        assert "not cacheable" in caplog.text
+        assert "has_media_id=True" in caplog.text
+        assert "has_aeskey=True" in caplog.text
+        assert "media-id-value" not in caplog.text
+        assert "secret-aes-value" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_cache_media_download_log_does_not_include_url_query(self, caplog):
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        caplog.set_level(logging.WARNING, logger="gateway.platforms.wecom")
+
+        cached = await adapter._cache_media(
+            "file",
+            {"url": "http://127.0.0.1/private?secret=secret-token"},
+            source="body.file",
+        )
+
+        assert cached is None
+        assert "Failed to download WeCom inbound media" in caplog.text
+        assert "secret-token" not in caplog.text
+        assert "?secret=" not in caplog.text
+        assert "http://127.0.0.1/.../private" in caplog.text
+
+    def test_extract_text_includes_quoted_mixed_text(self):
+        from gateway.platforms.wecom import WeComAdapter
+
+        text, reply_text = WeComAdapter._extract_text(
+            {
+                "msgtype": "text",
+                "text": {"content": "这是什么"},
+                "quote": {
+                    "msgtype": "mixed",
+                    "mixed": {
+                        "msg_item": [
+                            {"msgtype": "text", "text": {"content": "文件说明"}},
+                            {"msgtype": "image", "image": {"url": "https://example.com/i"}},
+                        ]
+                    },
+                },
+            }
+        )
+
+        assert text == "这是什么"
+        assert reply_text == "文件说明"
+
     @pytest.mark.asyncio
     async def test_on_message_builds_event(self):
         from gateway.platforms.wecom import WeComAdapter

@@ -98,6 +98,24 @@ class TestCacheDocumentFromBytes:
         path = cache_document_from_bytes(b"data", None)
         assert "document" in os.path.basename(path)
 
+    def test_long_filename_is_truncated_with_extension_preserved(self):
+        long_stem = "论证式教学在高中生物学教学设计中的实践应用_" * 20
+        path = cache_document_from_bytes(b"data", f"{long_stem}.docx")
+        basename = os.path.basename(path)
+
+        assert os.path.exists(path)
+        assert basename.endswith(".docx")
+        assert len(basename.encode("utf-8")) <= 240
+
+    def test_long_percent_encoded_filename_is_truncated(self):
+        long_name = ("%E8%AE%BA%E8%AF%81%E5%BC%8F%E6%95%99%E5%AD%A6_" * 20) + ".docx"
+        path = cache_document_from_bytes(b"data", long_name)
+        basename = os.path.basename(path)
+
+        assert os.path.exists(path)
+        assert basename.endswith(".docx")
+        assert len(basename.encode("utf-8")) <= 240
+
 
 # ---------------------------------------------------------------------------
 # TestCleanupDocumentCache
