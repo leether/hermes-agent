@@ -827,7 +827,6 @@ def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
 
 DOCUMENT_CACHE_DIR = get_hermes_dir("cache/documents", "document_cache")
 SCREENSHOT_CACHE_DIR = get_hermes_dir("cache/screenshots", "browser_screenshots")
-DOCUMENT_CACHE_BASENAME_MAX_BYTES = 240
 _HERMES_HOME = get_hermes_home()
 _HERMES_ROOT = get_default_hermes_root()
 MEDIA_DELIVERY_ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
@@ -1140,6 +1139,9 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".sh": "text/plain",
 }
 
+_SAFE_CACHE_EXTENSION_RE = re.compile(r"^\.[A-Za-z0-9]{1,16}$")
+_COMMAND_EDGE_IGNORABLES = "\u200b\u200c\u200d\u200e\u200f\u2060\ufeff"
+
 
 # ---------------------------------------------------------------------------
 # Image document types
@@ -1238,41 +1240,23 @@ def get_document_cache_dir() -> Path:
     return DOCUMENT_CACHE_DIR
 
 
-def _prefix_within_utf8_limit(value: str, limit: int) -> str:
-    if len(value.encode("utf-8")) <= limit:
-        return value
-    result = []
-    used = 0
-    for char in value:
-        encoded = char.encode("utf-8")
-        if used + len(encoded) > limit:
-            break
-        result.append(char)
-        used += len(encoded)
-    return "".join(result)
-
-
-def _limit_filename_utf8_bytes(filename: str, max_bytes: int = DOCUMENT_CACHE_BASENAME_MAX_BYTES) -> str:
-    if len(filename.encode("utf-8")) <= max_bytes:
-        return filename
-
-    suffix = Path(filename).suffix
-    suffix_bytes = len(suffix.encode("utf-8"))
-    if suffix and suffix_bytes < max_bytes:
-        stem_budget = max_bytes - suffix_bytes
-        stem = filename[: -len(suffix)]
-        limited_stem = _prefix_within_utf8_limit(stem, stem_budget).rstrip(" .")
-        return f"{limited_stem or 'document'}{suffix}"
-
-    return _prefix_within_utf8_limit(filename, max_bytes).rstrip(" .") or "document"
+def _safe_cache_extension(filename: str) -> str:
+    """Return a short extension suitable for cache filenames."""
+    ext = Path(filename or "").suffix.lower()
+    if _SAFE_CACHE_EXTENSION_RE.fullmatch(ext):
+        return ext
+    return ""
 
 
 def cache_document_from_bytes(data: bytes, filename: str) -> str:
     """
     Save raw document bytes to the cache and return the absolute file path.
 
-    The cached filename preserves the original human-readable name with a
-    unique prefix: ``doc_{uuid12}_{original_filename}``.
+    The cached filename is intentionally opaque and ASCII-only:
+    ``doc_{uuid12}{ext}``. The human-readable platform filename is preserved
+    separately in ``CachedMedia.display_name`` / transcript context. Keeping it
+    out of the local path avoids path-copy failures caused by long Unicode,
+    percent-encoded, or client-truncated names.
 
     Args:
         data: Raw document bytes.
@@ -1285,19 +1269,26 @@ def cache_document_from_bytes(data: bytes, filename: str) -> str:
         ValueError: If the sanitized path escapes the cache directory.
     """
     cache_dir = get_document_cache_dir()
-    # Sanitize: strip directory components, null bytes, and control characters
+    # Strip directory components before deriving the extension.
     safe_name = Path(filename).name if filename else "document"
     safe_name = safe_name.replace("\x00", "").strip()
     if not safe_name or safe_name in {".", ".."}:
         safe_name = "document"
-    cached_name = f"doc_{uuid.uuid4().hex[:12]}_{safe_name}"
-    cached_name = _limit_filename_utf8_bytes(cached_name)
+    cached_name = f"doc_{uuid.uuid4().hex[:12]}{_safe_cache_extension(safe_name)}"
     filepath = cache_dir / cached_name
     # Final safety check: ensure path stays inside cache dir
     if not filepath.resolve().is_relative_to(cache_dir.resolve()):
         raise ValueError(f"Path traversal rejected: {filename!r}")
     filepath.write_bytes(data)
     return str(filepath)
+
+
+def _normalized_command_text(text: str) -> str:
+    """Normalize command-only edge characters without rewriting user prose."""
+    command_text = str(text or "").strip(_COMMAND_EDGE_IGNORABLES)
+    if command_text.startswith("\uff0f"):
+        command_text = "/" + command_text[1:]
+    return command_text
 
 
 def cleanup_document_cache(max_age_hours: int = 24) -> int:
@@ -1502,14 +1493,14 @@ class MessageEvent:
     
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""
-        return self.text.startswith("/")
+        return _normalized_command_text(self.text).startswith("/")
     
     def get_command(self) -> Optional[str]:
         """Extract command name if this is a command message."""
         if not self.is_command():
             return None
         # Split on space and get first word, strip the /
-        parts = self.text.split(maxsplit=1)
+        parts = _normalized_command_text(self.text).split(maxsplit=1)
         raw = parts[0][1:].lower() if parts else None
         if raw and "@" in raw:
             raw = raw.split("@", 1)[0]
@@ -1522,7 +1513,7 @@ class MessageEvent:
         """Get the arguments after a command."""
         if not self.is_command():
             return self.text
-        parts = self.text.split(maxsplit=1)
+        parts = _normalized_command_text(self.text).split(maxsplit=1)
         args = parts[1] if len(parts) > 1 else ""
         # iOS auto-corrects -- to — (em dash) and - to – (en dash)
         args = args.replace("\u2014\u2014", "--").replace("\u2014", "--").replace("\u2013", "-")

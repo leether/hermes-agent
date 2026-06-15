@@ -71,6 +71,14 @@ class TestMessageEventIsCommand:
         event = MessageEvent(text="/")
         assert event.is_command() is True
 
+    def test_word_joiner_wrapped_command(self):
+        event = MessageEvent(text="\u2060/approve always\u2060")
+        assert event.is_command() is True
+
+    def test_fullwidth_slash_command(self):
+        event = MessageEvent(text="\uff0fapprove always")
+        assert event.is_command() is True
+
 
 class TestMessageEventGetCommand:
     def test_simple_command(self):
@@ -105,6 +113,14 @@ class TestMessageEventGetCommand:
         event = MessageEvent(text="/RESET@TigerNanoBot")
         assert event.get_command() == "reset"
 
+    def test_word_joiner_wrapped_command_name(self):
+        event = MessageEvent(text="\u2060/APPROVE always\u2060")
+        assert event.get_command() == "approve"
+
+    def test_fullwidth_slash_command_name(self):
+        event = MessageEvent(text="\uff0fapprove always")
+        assert event.get_command() == "approve"
+
 
 class TestMessageEventGetCommandArgs:
     def test_command_with_args(self):
@@ -118,6 +134,10 @@ class TestMessageEventGetCommandArgs:
     def test_not_a_command_returns_full_text(self):
         event = MessageEvent(text="hello world")
         assert event.get_command_args() == "hello world"
+
+    def test_word_joiner_wrapped_command_args(self):
+        event = MessageEvent(text="\u2060/approve always\u2060")
+        assert event.get_command_args() == "always"
 
 
 # ---------------------------------------------------------------------------

@@ -58,13 +58,18 @@ class TestCacheDocumentFromBytes:
         assert os.path.exists(path)
         assert Path(path).read_bytes() == data
 
-    def test_filename_preserved_in_path(self):
+    def test_extension_preserved_in_opaque_path(self):
         path = cache_document_from_bytes(b"data", "report.pdf")
-        assert "report.pdf" in os.path.basename(path)
+        basename = os.path.basename(path)
+        assert basename.startswith("doc_")
+        assert basename.endswith(".pdf")
+        assert "report" not in basename
 
-    def test_empty_filename_uses_fallback(self):
+    def test_empty_filename_uses_opaque_path(self):
         path = cache_document_from_bytes(b"data", "")
-        assert "document" in os.path.basename(path)
+        basename = os.path.basename(path)
+        assert basename.startswith("doc_")
+        assert "document" not in basename
 
     def test_unique_filenames(self):
         p1 = cache_document_from_bytes(b"a", "same.txt")
@@ -72,10 +77,11 @@ class TestCacheDocumentFromBytes:
         assert p1 != p2
 
     def test_path_traversal_blocked(self):
-        """Malicious directory components are stripped — only the leaf name survives."""
+        """Malicious directory components are stripped before deriving metadata."""
         path = cache_document_from_bytes(b"data", "../../etc/passwd")
         basename = os.path.basename(path)
-        assert "passwd" in basename
+        assert basename.startswith("doc_")
+        assert "passwd" not in basename
         # Must NOT contain directory separators
         assert ".." not in basename
         # File must reside inside the cache directory
@@ -86,35 +92,39 @@ class TestCacheDocumentFromBytes:
         path = cache_document_from_bytes(b"data", "file\x00.pdf")
         basename = os.path.basename(path)
         assert "\x00" not in basename
-        assert "file.pdf" in basename
+        assert basename.endswith(".pdf")
 
     def test_dot_dot_filename_handled(self):
-        """A filename that is literally '..' falls back to 'document'."""
+        """A filename that is literally '..' still gets an opaque cache path."""
         path = cache_document_from_bytes(b"data", "..")
         basename = os.path.basename(path)
-        assert "document" in basename
+        assert basename.startswith("doc_")
 
     def test_none_filename_uses_fallback(self):
         path = cache_document_from_bytes(b"data", None)
-        assert "document" in os.path.basename(path)
+        assert os.path.basename(path).startswith("doc_")
 
-    def test_long_filename_is_truncated_with_extension_preserved(self):
+    def test_long_filename_not_copied_to_path(self):
         long_stem = "论证式教学在高中生物学教学设计中的实践应用_" * 20
         path = cache_document_from_bytes(b"data", f"{long_stem}.docx")
         basename = os.path.basename(path)
 
         assert os.path.exists(path)
+        assert basename.startswith("doc_")
         assert basename.endswith(".docx")
-        assert len(basename.encode("utf-8")) <= 240
+        assert "论证式教学" not in basename
+        assert len(basename.encode("utf-8")) < 255
 
-    def test_long_percent_encoded_filename_is_truncated(self):
-        long_name = ("%E8%AE%BA%E8%AF%81%E5%BC%8F%E6%95%99%E5%AD%A6_" * 20) + ".docx"
+    def test_long_percent_encoded_filename_not_copied_to_path(self):
+        long_name = ("%E8%AE%BA%E8%AF%81%E5%BC%8F%E6%95%99%E5%AD%A6_" * 20) + "%E.docx"
         path = cache_document_from_bytes(b"data", long_name)
         basename = os.path.basename(path)
 
         assert os.path.exists(path)
+        assert basename.startswith("doc_")
         assert basename.endswith(".docx")
-        assert len(basename.encode("utf-8")) <= 240
+        assert "%" not in basename
+        assert len(basename.encode("utf-8")) < 255
 
 
 # ---------------------------------------------------------------------------
