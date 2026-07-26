@@ -3272,6 +3272,48 @@ class TestSessionIdHeader:
             assert call_kwargs["session_id"] == "my-session-123"
 
     @pytest.mark.asyncio
+    async def test_stale_compression_parent_resolves_before_loading_history(
+        self,
+        auth_adapter,
+    ):
+        """A retry after a lost compression response resumes the persisted child."""
+        mock_result = {"final_response": "Recovered", "messages": [], "api_calls": 1}
+        child_history = [
+            {"role": "assistant", "content": "compressed context"},
+        ]
+        mock_db = MagicMock()
+        mock_db.resolve_resume_session_id.return_value = "compressed-child"
+        mock_db.get_messages_as_conversation.return_value = child_history
+        auth_adapter._session_db = mock_db
+        app = _create_app(auth_adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "X-Hermes-Session-Id": "compressed-parent",
+                        "Authorization": "Bearer sk-secret",
+                    },
+                    json={
+                        "model": "hermes-agent",
+                        "messages": [{"role": "user", "content": "retry"}],
+                    },
+                )
+
+        assert resp.status == 200
+        assert resp.headers["X-Hermes-Session-Id"] == "compressed-child"
+        mock_db.resolve_resume_session_id.assert_called_once_with("compressed-parent")
+        mock_db.get_messages_as_conversation.assert_called_once_with("compressed-child")
+        call_kwargs = mock_run.call_args.kwargs
+        assert call_kwargs["session_id"] == "compressed-child"
+        assert call_kwargs["conversation_history"] == child_history
+
+    @pytest.mark.asyncio
     async def test_provided_session_id_loads_history_from_db(self, auth_adapter):
         """When X-Hermes-Session-Id is provided, history comes from SessionDB not request body."""
         mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}

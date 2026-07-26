@@ -94,3 +94,50 @@ def test_prefers_most_recent_child_when_fork_exists(db):
     ])
     db.append_message("newer_fork", role="user", content="x")
     assert db.resolve_resume_session_id("parent") == "newer_fork"
+
+
+def test_compression_parent_with_messages_advances_to_continuation(db):
+    db.create_session("parent", source="api_server")
+    db.append_message("parent", role="user", content="pre-compression history")
+    db.end_session("parent", "compression")
+    db.create_session(
+        "continuation",
+        source="api_server",
+        parent_session_id="parent",
+    )
+    db.append_message("continuation", role="assistant", content="compressed context")
+
+    assert db.resolve_resume_session_id("parent") == "continuation"
+
+
+def test_compression_siblings_prefer_latest_message_activity(db):
+    db.create_session("parent", source="api_server")
+    db.append_message("parent", role="user", content="pre-compression history")
+    db.end_session("parent", "compression")
+    db.create_session("active_child", source="api_server", parent_session_id="parent")
+    db.create_session("later_retry", source="api_server", parent_session_id="parent")
+    db.append_message("active_child", role="assistant", content="continued conversation")
+    db.append_message("later_retry", role="assistant", content="stale retry")
+
+    # The active child started first but received the latest real activity.
+    db._conn.execute(
+        "UPDATE messages SET timestamp = ? WHERE session_id = ?",
+        (2_000.0, "active_child"),
+    )
+    db._conn.execute(
+        "UPDATE messages SET timestamp = ? WHERE session_id = ?",
+        (1_000.0, "later_retry"),
+    )
+    db._conn.commit()
+
+    assert db.resolve_resume_session_id("parent") == "active_child"
+
+
+def test_compression_does_not_follow_child_created_before_parent_ended(db):
+    db.create_session("parent", source="api_server")
+    db.create_session("delegate", source="api_server", parent_session_id="parent")
+    db.append_message("delegate", role="assistant", content="subagent output")
+    db.append_message("parent", role="user", content="main conversation")
+    db.end_session("parent", "compression")
+
+    assert db.resolve_resume_session_id("parent") == "parent"

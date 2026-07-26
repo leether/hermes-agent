@@ -248,6 +248,47 @@ async def test_session_chat_loads_history_and_preserves_session_headers(auth_ada
 
 
 @pytest.mark.asyncio
+async def test_session_chat_recovers_compression_child_from_stale_parent_id(
+    auth_adapter,
+    session_db,
+):
+    parent_id = session_db.create_session("compressed-parent", "api_server")
+    session_db.append_message(parent_id, "user", "large pre-compression history")
+    session_db.end_session(parent_id, "compression")
+    child_id = session_db.create_session(
+        "compressed-child",
+        "api_server",
+        parent_session_id=parent_id,
+    )
+    session_db.append_message(child_id, "assistant", "compressed context")
+
+    mock_run = AsyncMock(
+        return_value=(
+            {"final_response": "recovered", "session_id": child_id},
+            {"total_tokens": 2},
+        )
+    )
+    app = _create_session_app(auth_adapter)
+    with patch.object(auth_adapter, "_run_agent", mock_run):
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                f"/api/sessions/{parent_id}/chat",
+                json={"message": "retry after timeout"},
+                headers={"Authorization": "Bearer sk-test"},
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+
+    assert resp.headers["X-Hermes-Session-Id"] == child_id
+    assert payload["session_id"] == child_id
+    _, kwargs = mock_run.call_args
+    assert kwargs["session_id"] == child_id
+    assert kwargs["conversation_history"] == [
+        {"role": "assistant", "content": "compressed context"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_session_chat_accepts_multimodal_message(auth_adapter, session_db):
     session_id = session_db.create_session("image-session", "api_server")
     image_payload = [
