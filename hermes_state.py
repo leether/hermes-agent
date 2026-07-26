@@ -2774,66 +2774,133 @@ class SessionDB:
         }
 
     def resolve_resume_session_id(self, session_id: str) -> str:
-        """Redirect a resume target to the descendant session that holds the messages.
+        """Redirect a resume target to the live descendant that holds the messages.
 
         Context compression ends the current session and forks a new child session
-        (linked via ``parent_session_id``). The flush cursor is reset, so the
-        child is where new messages actually land — the parent ends up with
-        ``message_count = 0`` rows unless messages had already been flushed to
-        it before compression. See #15000.
+        (linked via ``parent_session_id``). Two persisted shapes must resume:
 
-        This helper walks ``parent_session_id`` forward from ``session_id`` and
-        returns the first descendant in the chain that has at least one message
-        row. If the original session already has messages, or no descendant
-        has any, the original ``session_id`` is returned unchanged.
+        * legacy compression rows where the parent is empty (#15000);
+        * request-time compression where the ended parent still has its old
+          messages and the new child already has the compressed conversation.
 
-        The chain is always walked via the child whose ``started_at`` is
-        latest; that matches the single-chain shape that compression creates.
-        A depth cap (32) guards against accidental loops in malformed data.
+        For a parent explicitly ended by compression, only children created
+        after ``ended_at`` are eligible. If retries created siblings, prefer
+        the child with the latest persisted message activity instead of merely
+        the latest ``started_at``. This lets a caller safely retry with a stale
+        parent id after the response carrying the new id timed out.
+
+        Empty parents without compression metadata retain the legacy
+        descendant walk for backward compatibility. A depth cap guards against
+        malformed cycles.
         """
         if not session_id:
             return session_id
 
         with self._lock:
-            # If this session already has messages, nothing to redirect.
             try:
-                row = self._conn.execute(
-                    "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+                session_row = self._conn.execute(
+                    "SELECT id, ended_at, end_reason FROM sessions WHERE id = ?",
                     (session_id,),
                 ).fetchone()
             except Exception:
                 return session_id
-            if row is not None:
+            if session_row is None:
                 return session_id
 
-            # Walk descendants: at each step, pick the most-recently-started
-                # child session; stop once we find one with messages.
+            def _has_messages(candidate_id: str) -> bool:
+                row = self._conn.execute(
+                    "SELECT 1 FROM messages "
+                    "WHERE session_id = ? AND active = 1 LIMIT 1",
+                    (candidate_id,),
+                ).fetchone()
+                return row is not None
+
+            original_has_messages = _has_messages(session_id)
+
+            # Compression parents must advance even when their pre-compression
+            # transcript was already flushed. This is the request-time failure
+            # shape: the child committed, but the caller never received its id.
+            if (
+                session_row["end_reason"] == "compression"
+                and session_row["ended_at"] is not None
+            ):
+                current = session_id
+                best = session_id if original_has_messages else None
+                seen = {current}
+                for _ in range(32):
+                    child_row = self._conn.execute(
+                        "SELECT child.id, child.ended_at, child.end_reason, "
+                        "       EXISTS("
+                        "           SELECT 1 FROM messages cm "
+                        "           WHERE cm.session_id = child.id AND cm.active = 1"
+                        "       ) AS has_messages, "
+                        "       COALESCE(("
+                        "           SELECT MAX(cm.timestamp) FROM messages cm "
+                        "           WHERE cm.session_id = child.id AND cm.active = 1"
+                        "       ), child.started_at) AS last_active "
+                        "FROM sessions child "
+                        "JOIN sessions parent ON parent.id = child.parent_session_id "
+                        "WHERE child.parent_session_id = ? "
+                        "  AND parent.end_reason = 'compression' "
+                        "  AND parent.ended_at IS NOT NULL "
+                        "  AND child.started_at >= parent.ended_at "
+                        "ORDER BY has_messages DESC, last_active DESC, "
+                        "         child.started_at DESC, child.id DESC "
+                        "LIMIT 1",
+                        (current,),
+                    ).fetchone()
+                    if child_row is None:
+                        return best or session_id
+                    child_id = child_row["id"]
+                    if not child_id or child_id in seen:
+                        return best or session_id
+                    seen.add(child_id)
+                    if child_row["has_messages"]:
+                        best = child_id
+                    if (
+                        child_row["end_reason"] != "compression"
+                        or child_row["ended_at"] is None
+                    ):
+                        return best or session_id
+                    current = child_id
+                return best or session_id
+
+            # A non-compression session with messages is already the correct
+            # resume target.
+            if original_has_messages:
+                return session_id
+
+            # Backward-compatible recovery for legacy empty-parent rows that
+            # predate reliable end_reason/ended_at persistence.
             current = session_id
             seen = {current}
             for _ in range(32):
                 try:
                     child_row = self._conn.execute(
-                        "SELECT id FROM sessions "
-                        "WHERE parent_session_id = ? "
-                        "ORDER BY started_at DESC, id DESC LIMIT 1",
+                        "SELECT child.id, "
+                        "       EXISTS("
+                        "           SELECT 1 FROM messages cm "
+                        "           WHERE cm.session_id = child.id AND cm.active = 1"
+                        "       ) AS has_messages, "
+                        "       COALESCE(("
+                        "           SELECT MAX(cm.timestamp) FROM messages cm "
+                        "           WHERE cm.session_id = child.id AND cm.active = 1"
+                        "       ), child.started_at) AS last_active "
+                        "FROM sessions child "
+                        "WHERE child.parent_session_id = ? "
+                        "ORDER BY has_messages DESC, last_active DESC, "
+                        "         child.started_at DESC, child.id DESC LIMIT 1",
                         (current,),
                     ).fetchone()
                 except Exception:
                     return session_id
                 if child_row is None:
                     return session_id
-                child_id = child_row["id"] if hasattr(child_row, "keys") else child_row[0]
+                child_id = child_row["id"]
                 if not child_id or child_id in seen:
                     return session_id
                 seen.add(child_id)
-                try:
-                    msg_row = self._conn.execute(
-                        "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
-                        (child_id,),
-                    ).fetchone()
-                except Exception:
-                    return session_id
-                if msg_row is not None:
+                if child_row["has_messages"]:
                     return child_id
                 current = child_id
         return session_id

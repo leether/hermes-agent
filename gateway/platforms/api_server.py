@@ -1349,6 +1349,28 @@ class APIServerAdapter(BasePlatformAdapter):
             return None, web.json_response(_openai_error(f"Session not found: {session_id}", code="session_not_found"), status=404)
         return session, None
 
+    def _resolve_session_for_resume(self, session_id: str) -> str:
+        """Return the effective continuation id for a persisted session.
+
+        A request can time out after compression has already committed a child
+        session but before the caller receives the response header containing
+        that child's id. Resolving at the API boundary makes a retry with the
+        stale, ended parent id converge on the persisted continuation.
+        """
+        db = self._ensure_session_db()
+        if db is None:
+            return session_id
+        try:
+            resolved_id = db.resolve_resume_session_id(session_id)
+            return resolved_id if isinstance(resolved_id, str) and resolved_id else session_id
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve continuation for session %s: %s",
+                session_id,
+                exc,
+            )
+            return session_id
+
     def _conversation_history_for_session(self, session_id: str) -> List[Dict[str, Any]]:
         db = self._ensure_session_db()
         if db is None:
@@ -1553,6 +1575,7 @@ class APIServerAdapter(BasePlatformAdapter):
         _, err = self._get_existing_session_or_404(session_id)
         if err:
             return err
+        session_id = self._resolve_session_for_resume(session_id)
         body, err = await self._read_json_body(request)
         if err:
             return err
@@ -1597,6 +1620,7 @@ class APIServerAdapter(BasePlatformAdapter):
         _, err = self._get_existing_session_or_404(session_id)
         if err:
             return err
+        session_id = self._resolve_session_for_resume(session_id)
         body, err = await self._read_json_body(request)
         if err:
             return err
@@ -1819,7 +1843,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     {"error": {"message": "Invalid session ID", "type": "invalid_request_error"}},
                     status=400,
                 )
-            session_id = provided_session_id
+            session_id = self._resolve_session_for_resume(provided_session_id)
             try:
                 db = self._ensure_session_db()
                 if db is not None:
