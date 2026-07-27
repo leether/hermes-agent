@@ -28,6 +28,7 @@ from agent.context_engine import ContextEngine
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
     get_model_context_length,
+    estimate_message_tokens_rough,
     estimate_messages_tokens_rough,
 )
 from agent.redact import redact_sensitive_text
@@ -891,13 +892,7 @@ class ContextCompressor(ContextEngine):
             min_protect = min(protect_tail_count, len(result))
             for i in range(len(result) - 1, -1, -1):
                 msg = result[i]
-                raw_content = msg.get("content") or ""
-                content_len = _content_length_for_budget(raw_content)
-                msg_tokens = content_len // _CHARS_PER_TOKEN + 10
-                for tc in msg.get("tool_calls") or []:
-                    if isinstance(tc, dict):
-                        args = tc.get("function", {}).get("arguments", "")
-                        msg_tokens += len(args) // _CHARS_PER_TOKEN
+                msg_tokens = max(1, estimate_message_tokens_rough(msg))
                 if accumulated + msg_tokens > protect_tail_tokens and (len(result) - i) >= min_protect:
                     boundary = i
                     break
@@ -2055,14 +2050,7 @@ This compaction should PRIORITISE preserving all information related to the focu
 
         for i in range(n - 1, head_end - 1, -1):
             msg = messages[i]
-            raw_content = msg.get("content") or ""
-            content_len = _content_length_for_budget(raw_content)
-            msg_tokens = content_len // _CHARS_PER_TOKEN + 10  # +10 for role/metadata
-            # Include tool call arguments in estimate
-            for tc in msg.get("tool_calls") or []:
-                if isinstance(tc, dict):
-                    args = tc.get("function", {}).get("arguments", "")
-                    msg_tokens += len(args) // _CHARS_PER_TOKEN
+            msg_tokens = max(1, estimate_message_tokens_rough(msg))
             # Stop once we exceed the soft ceiling (unless we haven't hit min_tail yet)
             if accumulated + msg_tokens > soft_ceiling and (n - i) >= min_tail:
                 break
@@ -2088,13 +2076,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             raw_accumulated = 0
             for j in range(n - 1, head_end - 1, -1):
                 raw_msg = messages[j]
-                raw_content = raw_msg.get("content") or ""
-                raw_len = _content_length_for_budget(raw_content)
-                raw_tok = raw_len // _CHARS_PER_TOKEN + 10
-                for tc in raw_msg.get("tool_calls") or []:
-                    if isinstance(tc, dict):
-                        args = tc.get("function", {}).get("arguments", "")
-                        raw_tok += len(args) // _CHARS_PER_TOKEN
+                raw_tok = max(1, estimate_message_tokens_rough(raw_msg))
                 if raw_accumulated + raw_tok > raw_budget and (n - j) >= min_tail:
                     cut_idx = j
                     break

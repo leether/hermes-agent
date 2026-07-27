@@ -1840,10 +1840,9 @@ class TestTransientTransportRetry:
     blip before escalating to the fallback chain.
 
     Salvaged from PR #16587 (@ARegalado1). The original fixed only the
-    context-compression caller; this lives in call_llm so every auxiliary
-    task (compression, memory flush, title-gen, session-search, vision)
-    gets the same same-target retry, and the gate reuses the canonical
-    _is_connection_error detector.
+    context-compression caller; this lives in call_llm so ordinary auxiliary
+    tasks get the same-target retry. Compression is deliberately excluded:
+    it has a strict outer callback deadline and moves directly to fallback.
     """
 
     def _patches(self, client):
@@ -1874,7 +1873,7 @@ class TestTransientTransportRetry:
         ]
         p1, p2, p3 = self._patches(client)
         with p1, p2, p3:
-            result = call_llm(task="compression", messages=[{"role": "user", "content": "hi"}])
+            result = call_llm(task="memory_flush", messages=[{"role": "user", "content": "hi"}])
         assert result == {"ok": True}
         # Same client called twice — no provider fallback needed.
         assert client.chat.completions.create.call_count == 2
@@ -1888,7 +1887,7 @@ class TestTransientTransportRetry:
         client.chat.completions.create.side_effect = [_Err503("upstream"), {"ok": True}]
         p1, p2, p3 = self._patches(client)
         with p1, p2, p3:
-            result = call_llm(task="compression", messages=[{"role": "user", "content": "hi"}])
+            result = call_llm(task="memory_flush", messages=[{"role": "user", "content": "hi"}])
         assert result == {"ok": True}
         assert client.chat.completions.create.call_count == 2
 
@@ -1901,7 +1900,7 @@ class TestTransientTransportRetry:
         client.chat.completions.create.side_effect = _Err400("bad request")
         p1, p2, p3 = self._patches(client)
         with p1, p2, p3, pytest.raises(_Err400):
-            call_llm(task="compression", messages=[{"role": "user", "content": "hi"}])
+            call_llm(task="memory_flush", messages=[{"role": "user", "content": "hi"}])
         # Non-transient: single attempt, no same-target retry.
         assert client.chat.completions.create.call_count == 1
 
@@ -1930,11 +1929,104 @@ class TestTransientTransportRetry:
                 return_value=(fb_client, "fb-model", "openai"),
             ),
         ):
-            result = call_llm(task="compression", messages=[{"role": "user", "content": "hi"}])
+            result = call_llm(task="memory_flush", messages=[{"role": "user", "content": "hi"}])
         assert result == {"fallback": True}
         # Primary tried twice (initial + same-target retry), then fallback.
         assert primary.chat.completions.create.call_count == 2
         assert fb_client.chat.completions.create.call_count == 1
+
+    def test_compression_skips_same_provider_retry_and_uses_fallback(self):
+        primary = MagicMock()
+        primary.base_url = "https://openrouter.ai/api/v1"
+        primary.chat.completions.create.side_effect = Exception(
+            "Request timed out."
+        )
+
+        fb_client = MagicMock()
+        fb_client.base_url = "https://api.openai.com/v1"
+        fb_client.chat.completions.create.return_value = {"fallback": True}
+
+        p1, p2, p3 = self._patches(primary)
+        with (
+            p1, p2, p3,
+            patch(
+                "agent.auxiliary_client._try_configured_fallback_chain",
+                return_value=(None, None, ""),
+            ),
+            patch(
+                "agent.auxiliary_client._try_main_agent_model_fallback",
+                return_value=(fb_client, "fb-model", "openai"),
+            ),
+        ):
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result == {"fallback": True}
+        assert primary.chat.completions.create.call_count == 1
+        assert fb_client.chat.completions.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_async_compression_skips_same_provider_retry(self):
+        primary = MagicMock()
+        primary.base_url = "https://openrouter.ai/api/v1"
+        primary.chat.completions.create = AsyncMock(
+            side_effect=Exception("Request timed out.")
+        )
+
+        sync_fallback = MagicMock()
+        sync_fallback.base_url = "https://api.openai.com/v1"
+        async_fallback = MagicMock()
+        async_fallback.base_url = "https://api.openai.com/v1"
+        async_fallback.chat.completions.create = AsyncMock(
+            return_value={"fallback": True}
+        )
+
+        p1, p2, p3 = self._patches(primary)
+        with (
+            p1, p2, p3,
+            patch(
+                "agent.auxiliary_client._try_configured_fallback_chain",
+                return_value=(None, None, ""),
+            ),
+            patch(
+                "agent.auxiliary_client._try_main_agent_model_fallback",
+                return_value=(sync_fallback, "fb-model", "openai"),
+            ),
+            patch(
+                "agent.auxiliary_client._to_async_client",
+                return_value=(async_fallback, "fb-model"),
+            ),
+        ):
+            result = await async_call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result == {"fallback": True}
+        assert primary.chat.completions.create.await_count == 1
+        assert async_fallback.chat.completions.create.await_count == 1
+
+    def test_compression_disables_openai_sdk_internal_retries(self):
+        import agent.auxiliary_client as aux
+
+        class _FakeSDKClient:
+            __module__ = "openai"
+
+            def __init__(self):
+                self.calls = []
+                self.bounded = object()
+
+            def with_options(self, **kwargs):
+                self.calls.append(kwargs)
+                return self.bounded
+
+        client = _FakeSDKClient()
+
+        assert aux._client_for_auxiliary_task(client, "compression") is client.bounded
+        assert client.calls == [{"max_retries": 0}]
+        assert aux._client_for_auxiliary_task(client, "memory_flush") is client
 
 
 class TestIsConnectionError:

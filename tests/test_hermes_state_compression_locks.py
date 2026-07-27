@@ -99,6 +99,36 @@ def test_non_expired_lock_is_held(db: SessionDB) -> None:
     assert db.try_acquire_compression_lock("sess1", "holder2") is False
 
 
+def test_owner_can_renew_before_expiry(db: SessionDB) -> None:
+    db.try_acquire_compression_lock("sess1", "holder1", ttl_seconds=0.08)
+    time.sleep(0.04)
+
+    assert db.renew_compression_lock(
+        "sess1", "holder1", ttl_seconds=0.15
+    ) is True
+    time.sleep(0.06)
+    assert db.try_acquire_compression_lock("sess1", "holder2") is False
+    assert db.get_compression_lock_holder("sess1") == "holder1"
+
+
+def test_wrong_holder_cannot_renew(db: SessionDB) -> None:
+    db.try_acquire_compression_lock("sess1", "holder1", ttl_seconds=60)
+
+    assert db.renew_compression_lock(
+        "sess1", "holder2", ttl_seconds=60
+    ) is False
+    assert db.get_compression_lock_holder("sess1") == "holder1"
+
+
+def test_expired_lease_cannot_be_revived_by_old_holder(db: SessionDB) -> None:
+    db.try_acquire_compression_lock("sess1", "old", ttl_seconds=0.03)
+    time.sleep(0.06)
+
+    assert db.renew_compression_lock("sess1", "old", ttl_seconds=60) is False
+    assert db.try_acquire_compression_lock("sess1", "fresh") is True
+    assert db.get_compression_lock_holder("sess1") == "fresh"
+
+
 # ----------------------------------------------------------------------
 # Empty / invalid input
 # ----------------------------------------------------------------------

@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,9 @@ from typing import Any, Optional, Tuple
 from agent.model_metadata import estimate_request_tokens_rough
 
 logger = logging.getLogger(__name__)
+
+_COMPRESSION_LOCK_TTL_SECONDS = 300.0
+_COMPRESSION_LOCK_RENEW_INTERVAL_SECONDS = 60.0
 
 # Stable marker the gateway matches on to re-tag the auto-compaction lifecycle
 # status as ``kind="compacting"`` (tui_gateway/server.py::_status_update), so
@@ -361,6 +365,10 @@ def compress_context(
     _lock_db = getattr(agent, "_session_db", None)
     _lock_sid = agent.session_id or ""
     _lock_holder: Optional[str] = None
+    _lock_lease_stop: Optional[threading.Event] = None
+    _lock_lease_lost: Optional[threading.Event] = None
+    _lock_lease_thread: Optional[threading.Thread] = None
+    _lock_renew: Optional[Any] = None
     # Probe whether the lock subsystem is actually available on this
     # SessionDB instance.  A process running mismatched module versions
     # (e.g. ``conversation_compression.py`` reloaded after a pull but the
@@ -381,7 +389,9 @@ def compress_context(
         _lock_holder = _compression_lock_holder(agent)
         try:
             _lock_acquired = _lock_db.try_acquire_compression_lock(
-                _lock_sid, _lock_holder
+                _lock_sid,
+                _lock_holder,
+                ttl_seconds=_COMPRESSION_LOCK_TTL_SECONDS,
             )
         except Exception as _lock_err:
             # Broken/absent lock subsystem (version skew, etc.).  Log once
@@ -425,8 +435,59 @@ def compress_context(
                 _existing_sp = agent._build_system_prompt(system_message)
             return messages, _existing_sp
 
+        renew_lock = getattr(_lock_db, "renew_compression_lock", None)
+        if _lock_holder and callable(renew_lock):
+            _lock_renew = renew_lock
+            _lock_lease_stop = threading.Event()
+            _lock_lease_lost = threading.Event()
+
+            def _renew_compression_lease() -> None:
+                assert _lock_lease_stop is not None
+                assert _lock_lease_lost is not None
+                while not _lock_lease_stop.wait(
+                    _COMPRESSION_LOCK_RENEW_INTERVAL_SECONDS
+                ):
+                    try:
+                        renewed = renew_lock(
+                            _lock_sid,
+                            _lock_holder,
+                            ttl_seconds=_COMPRESSION_LOCK_TTL_SECONDS,
+                        )
+                    except Exception as renew_err:
+                        logger.warning(
+                            "compression lock renewal failed: session=%s "
+                            "holder=%s error=%s",
+                            _lock_sid,
+                            _lock_holder,
+                            renew_err,
+                        )
+                        renewed = False
+                    if not renewed:
+                        _lock_lease_lost.set()
+                        logger.warning(
+                            "compression lock lease lost: session=%s holder=%s; "
+                            "rotation will be aborted",
+                            _lock_sid,
+                            _lock_holder,
+                        )
+                        return
+
+            _lock_lease_thread = threading.Thread(
+                target=_renew_compression_lease,
+                name=f"compression-lock-renew-{_lock_sid[:12]}",
+                daemon=True,
+            )
+            _lock_lease_thread.start()
+
     def _release_lock() -> None:
         """Release the lock keyed on the OLD session_id (before rotation)."""
+        if _lock_lease_stop is not None:
+            _lock_lease_stop.set()
+        if (
+            _lock_lease_thread is not None
+            and _lock_lease_thread is not threading.current_thread()
+        ):
+            _lock_lease_thread.join(timeout=1.0)
         if _lock_db is not None and _lock_sid and _lock_holder:
             try:
                 _lock_db.release_compression_lock(_lock_sid, _lock_holder)
@@ -441,16 +502,70 @@ def compress_context(
             pass
 
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
-    except TypeError:
-        # Plugin context engine with strict signature that doesn't accept
-        # focus_topic / force — fall back to calling without them.
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+        try:
+            compressed = agent.context_compressor.compress(
+                messages,
+                current_tokens=approx_tokens,
+                focus_topic=focus_topic,
+                force=force,
+            )
+        except TypeError:
+            # Plugin context engine with strict signature that doesn't accept
+            # focus_topic / force — fall back to calling without them.
+            compressed = agent.context_compressor.compress(
+                messages, current_tokens=approx_tokens
+            )
     except BaseException:
         # ANY exception during compress() must release the lock so the
         # session isn't permanently blocked from future compression.
         _release_lock()
         raise
+
+    # The summary call can take longer than the initial lease. Prove that we
+    # still own an unexpired lock immediately before mutating the parent/child
+    # lineage. A failed heartbeat (or final renewal) must return the original
+    # transcript without rotating the session.
+    if _lock_holder and _lock_db is not None and _lock_renew is not None:
+        _lease_owned = not (
+            _lock_lease_lost is not None and _lock_lease_lost.is_set()
+        )
+        if _lease_owned:
+            try:
+                _lease_owned = bool(
+                    _lock_renew(
+                        _lock_sid,
+                        _lock_holder,
+                        ttl_seconds=_COMPRESSION_LOCK_TTL_SECONDS,
+                    )
+                )
+            except Exception as renew_err:
+                logger.warning(
+                    "compression lock final renewal failed: session=%s "
+                    "holder=%s error=%s",
+                    _lock_sid,
+                    _lock_holder,
+                    renew_err,
+                )
+                _lease_owned = False
+        if not _lease_owned:
+            logger.warning(
+                "compression rotation aborted after lease loss: session=%s "
+                "holder=%s; returning messages unchanged",
+                _lock_sid,
+                _lock_holder,
+            )
+            try:
+                agent._emit_warning(
+                    "⚠ Compression lease expired before session rotation. "
+                    "No messages were dropped; compression will retry later."
+                )
+            except Exception:
+                pass
+            _existing_sp = getattr(agent, "_cached_system_prompt", None)
+            if not _existing_sp:
+                _existing_sp = agent._build_system_prompt(system_message)
+            _release_lock()
+            return messages, _existing_sp
 
     # If compression aborted (aux LLM failed to produce a usable summary)
     # the compressor returns the input messages unchanged.  Surface the

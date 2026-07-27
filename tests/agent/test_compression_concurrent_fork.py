@@ -77,6 +77,10 @@ def _build_agent_with_db(db: SessionDB, session_id: str):
     compressor._last_aux_model_failure_model = None
     compressor._last_aux_model_failure_error = None
     agent.context_compressor = compressor
+    # This fixture isolates the compression/rotation critical section. Avoid
+    # the unrelated lazy auxiliary-provider feasibility probe, which can
+    # serialize the two worker threads before either reaches the lock.
+    agent._compression_feasibility_checked = True
     return agent
 
 
@@ -171,6 +175,65 @@ def test_skipped_compression_returns_messages_unchanged(tmp_path: Path) -> None:
     assert agent.session_id == parent_sid
     # Compressor was never called (the skip happens before .compress())
     agent.context_compressor.compress.assert_not_called()
+
+
+def test_slow_compressor_renews_lease_past_initial_ttl(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A compressor remains exclusive after its original lease would expire."""
+    import agent.conversation_compression as cc
+
+    monkeypatch.setattr(cc, "_COMPRESSION_LOCK_TTL_SECONDS", 0.08)
+    monkeypatch.setattr(cc, "_COMPRESSION_LOCK_RENEW_INTERVAL_SECONDS", 0.02)
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    parent_sid = "RENEWED_LEASE_TEST"
+    db.create_session(parent_sid, source="discord")
+    agent = _build_agent_with_db(db, parent_sid)
+    messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+
+    worker = threading.Thread(
+        target=lambda: agent._compress_context(
+            messages, "sys", approx_tokens=120_000
+        ),
+    )
+    worker.start()
+    time.sleep(0.14)
+
+    assert db.try_acquire_compression_lock(
+        parent_sid, "competitor", ttl_seconds=1
+    ) is False
+
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert _count_children(db, parent_sid) == 1
+    assert db.get_compression_lock_holder(parent_sid) is None
+
+
+def test_lease_loss_aborts_rotation_and_child_creation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A lost lease fails safely after summarization and before rotation."""
+    import agent.conversation_compression as cc
+
+    monkeypatch.setattr(cc, "_COMPRESSION_LOCK_TTL_SECONDS", 0.08)
+    monkeypatch.setattr(cc, "_COMPRESSION_LOCK_RENEW_INTERVAL_SECONDS", 0.02)
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    parent_sid = "LOST_LEASE_TEST"
+    db.create_session(parent_sid, source="discord")
+    agent = _build_agent_with_db(db, parent_sid)
+    messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+    monkeypatch.setattr(db, "renew_compression_lock", lambda *_a, **_k: False)
+
+    compressed, _sp = agent._compress_context(
+        messages, "sys", approx_tokens=120_000
+    )
+
+    assert compressed is messages or compressed == messages
+    assert agent.session_id == parent_sid
+    assert _count_children(db, parent_sid) == 0
+    assert db.get_compression_lock_holder(parent_sid) is None
 
 
 class _NoLockSubsystemDB:

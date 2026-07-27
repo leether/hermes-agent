@@ -13,6 +13,7 @@ Coverage levels:
 import time
 
 import yaml
+import pytest
 from unittest.mock import patch, MagicMock
 
 from agent.model_metadata import (
@@ -20,6 +21,7 @@ from agent.model_metadata import (
     DEFAULT_CONTEXT_LENGTHS,
     DEFAULT_FALLBACK_CONTEXT,
     _strip_provider_prefix,
+    estimate_message_tokens_rough,
     estimate_tokens_rough,
     estimate_messages_tokens_rough,
     get_model_context_length,
@@ -90,6 +92,26 @@ class TestEstimateMessagesTokensRough:
         result = estimate_messages_tokens_rough([msg])
         assert result > 0
         assert result == (len(str(msg)) + 3) // 4
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("reasoning", "r" * 4000),
+            ("reasoning_content", "r" * 4000),
+            ("reasoning_details", [{"summary": "r" * 4000}]),
+            ("codex_reasoning_items", [{"text": "r" * 4000}]),
+            ("codex_message_items", [{"content": "r" * 4000}]),
+        ],
+    )
+    def test_single_message_estimator_counts_provider_replay_fields(
+        self, field, value
+    ):
+        base = {"role": "assistant", "content": "visible"}
+        enriched = {**base, field: value}
+
+        assert estimate_message_tokens_rough(enriched) > (
+            estimate_message_tokens_rough(base) + 900
+        )
 
     def test_message_with_list_content(self):
         """Vision messages with multimodal content arrays.
