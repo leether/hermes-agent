@@ -1278,7 +1278,10 @@ DEFAULT_CONFIG = {
             "model": "",
             "base_url": "",
             "api_key": "",
-            "timeout": 120,        # seconds — compression summarises large contexts; increase for local models
+            # Keep the default primary + fallback window below the 200-second
+            # WorkTool visible-reply deadline. Compression disables hidden SDK
+            # retries; users of slow local models can still raise this value.
+            "timeout": 90,
             "extra_body": {},
         },
         # Note: session_search no longer uses an auxiliary LLM (PR #27590 —

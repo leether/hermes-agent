@@ -1426,6 +1426,41 @@ class SessionDB:
             # which is the safe behaviour when the lock subsystem is broken.
             return False
 
+    def renew_compression_lock(
+        self,
+        session_id: str,
+        holder: str,
+        ttl_seconds: float = 300.0,
+    ) -> bool:
+        """Extend an unexpired compression lease iff ``holder`` still owns it.
+
+        Renewal never revives an expired lease and never changes ownership.
+        This lets a slow compressor retain exclusive ownership without
+        allowing a late heartbeat to overwrite a lock already reclaimed by a
+        different process.
+        """
+        if not session_id or not holder:
+            return False
+        now = time.time()
+        expires_at = now + ttl_seconds
+
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE compression_locks SET expires_at = ? "
+                "WHERE session_id = ? AND holder = ? AND expires_at >= ?",
+                (expires_at, session_id, holder, now),
+            )
+            return cursor.rowcount == 1
+
+        try:
+            return bool(self._execute_write(_do))
+        except sqlite3.Error as exc:
+            logger.warning(
+                "renew_compression_lock(%s) failed: %s",
+                session_id, exc,
+            )
+            return False
+
     def release_compression_lock(self, session_id: str, holder: str) -> None:
         """Release the compression lock for ``session_id`` iff we own it.
 

@@ -4752,6 +4752,35 @@ def _resolve_task_provider_model(
 _DEFAULT_AUX_TIMEOUT = 30.0
 
 
+def _client_for_auxiliary_task(client: Any, task: Optional[str]) -> Any:
+    """Return a task-scoped SDK client with bounded retry semantics.
+
+    The OpenAI SDK retries timeouts internally by default. For compression,
+    that silently multiplies the configured per-attempt timeout before
+    Hermes can fall back, which can exceed the outer WorkTool callback
+    deadline. Hermes owns the compression fallback policy, so disable only
+    the SDK's hidden retries for this task.
+
+    Non-SDK adapters and test doubles are returned unchanged.
+    """
+    if task != "compression" or client is None:
+        return client
+    module_name = str(getattr(type(client), "__module__", "") or "")
+    if module_name != "openai" and not module_name.startswith("openai."):
+        return client
+    with_options = getattr(client, "with_options", None)
+    if not callable(with_options):
+        return client
+    try:
+        return with_options(max_retries=0)
+    except Exception:
+        logger.debug(
+            "Auxiliary compression: unable to disable SDK retries",
+            exc_info=True,
+        )
+        return client
+
+
 def _get_auxiliary_task_config(task: str) -> Dict[str, Any]:
     """Return the config dict for auxiliary.<task>, or {} when unavailable.
 
@@ -5147,6 +5176,8 @@ def call_llm(
                 f"Run: hermes setup")
 
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
+    _cached_client = client
+    client = _client_for_auxiliary_task(client, task)
 
     # Log what we're about to do — makes auxiliary operations visible
     _base_info = str(getattr(client, "base_url", resolved_base_url) or "")
@@ -5185,7 +5216,10 @@ def call_llm(
             return _validate_llm_response(
                 client.chat.completions.create(**kwargs), task)
         except Exception as transient_err:
-            if not _is_transient_transport_error(transient_err):
+            if (
+                not _is_transient_transport_error(transient_err)
+                or task == "compression"
+            ):
                 raise
             logger.info(
                 "Auxiliary %s: transient transport error; retrying once on "
@@ -5482,6 +5516,7 @@ def call_llm(
                         resolved_provider, task, reason=reason)
 
             if fb_client is not None:
+                fb_client = _client_for_auxiliary_task(fb_client, task)
                 fb_kwargs = _build_call_kwargs(
                     fb_label, fb_model, messages,
                     temperature=temperature, max_tokens=max_tokens,
@@ -5505,7 +5540,7 @@ def call_llm(
         # dead one.  See issue #23432.
         if _is_connection_error(first_err):
             try:
-                _evict_cached_client_instance(client)
+                _evict_cached_client_instance(_cached_client)
             except Exception:
                 logger.debug("Auxiliary: cache eviction after connection error failed",
                              exc_info=True)
@@ -5643,6 +5678,8 @@ async def async_call_llm(
                 f"Run: hermes setup")
 
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
+    _cached_client = client
+    client = _client_for_auxiliary_task(client, task)
 
     # Pass the client's actual base_url (not just resolved_base_url) so
     # endpoint-specific temperature overrides can distinguish
@@ -5666,7 +5703,10 @@ async def async_call_llm(
             return _validate_llm_response(
                 await client.chat.completions.create(**kwargs), task)
         except Exception as transient_err:
-            if not _is_transient_transport_error(transient_err):
+            if (
+                not _is_transient_transport_error(transient_err)
+                or task == "compression"
+            ):
                 raise
             logger.info(
                 "Auxiliary %s (async): transient transport error; retrying "
@@ -5929,6 +5969,7 @@ async def async_call_llm(
                 async_fb, async_fb_model = _to_async_client(
                     fb_client, fb_model or "", is_vision=(task == "vision")
                 )
+                async_fb = _client_for_auxiliary_task(async_fb, task)
                 if async_fb_model and async_fb_model != fb_kwargs.get("model"):
                     fb_kwargs["model"] = async_fb_model
                 return _validate_llm_response(
@@ -5943,7 +5984,7 @@ async def async_call_llm(
         # so the next aux call rebuilds.  See issue #23432.
         if _is_connection_error(first_err):
             try:
-                _evict_cached_client_instance(client)
+                _evict_cached_client_instance(_cached_client)
             except Exception:
                 logger.debug("Auxiliary (async): cache eviction after connection error failed",
                              exc_info=True)

@@ -1985,6 +1985,24 @@ def estimate_tokens_rough(text: str) -> int:
     return (len(text) + 3) // 4
 
 
+_IMAGE_TOKEN_COST = 1500
+
+
+def estimate_message_tokens_rough(msg: Dict[str, Any]) -> int:
+    """Rough token estimate for one provider-visible message.
+
+    The estimator covers the full persisted message shape, not only
+    ``content``. Reasoning fields, Codex replay items, tool calls, and other
+    provider-visible metadata can all consume the next request's tail budget.
+
+    Image parts are counted at a flat cost instead of by raw base64 length.
+    """
+    return (
+        (_estimate_message_chars(msg) + 3) // 4
+        + _count_image_tokens(msg, _IMAGE_TOKEN_COST)
+    )
+
+
 def estimate_messages_tokens_rough(messages: List[Dict[str, Any]]) -> int:
     """Rough token estimate for a message list (pre-flight only).
 
@@ -1993,7 +2011,6 @@ def estimate_messages_tokens_rough(messages: List[Dict[str, Any]]) -> int:
     character length. Without this, a single ~1MB screenshot would be
     estimated at ~250K tokens and trigger premature context compression.
     """
-    _IMAGE_TOKEN_COST = 1500
     total_chars = 0
     image_tokens = 0
     for msg in messages:

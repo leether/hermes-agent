@@ -1785,6 +1785,29 @@ class TestTokenBudgetTailProtection:
         # But at least 3 (hard minimum)
         assert tail_size >= 3
 
+    def test_reasoning_heavy_messages_consume_tail_budget(
+        self, budget_compressor
+    ):
+        """Provider-visible reasoning must not be a free tail-budget field."""
+        c = budget_compressor
+        c.tail_token_budget = 500
+        c.protect_last_n = 8
+        base_messages = [
+            {"role": "assistant", "content": f"{i}:" + ("x" * 200)}
+            for i in range(30)
+        ]
+        reasoning_messages = [dict(msg) for msg in base_messages]
+        reasoning_messages[-1]["reasoning"] = "r" * 8000
+
+        plain_cut = c._find_tail_cut_by_tokens(base_messages, head_end=0)
+        reasoning_cut = c._find_tail_cut_by_tokens(
+            reasoning_messages, head_end=0
+        )
+
+        assert len(base_messages) - plain_cut > 8
+        assert len(reasoning_messages) - reasoning_cut == 8
+        assert reasoning_cut > plain_cut
+
     def test_min_tail_always_3_messages(self, budget_compressor):
         """Even with a tiny token budget, at least 3 messages are protected."""
         c = budget_compressor
