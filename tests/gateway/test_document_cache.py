@@ -58,13 +58,18 @@ class TestCacheDocumentFromBytes:
         assert os.path.exists(path)
         assert Path(path).read_bytes() == data
 
-    def test_filename_preserved_in_path(self):
+    def test_extension_preserved_in_opaque_path(self):
         path = cache_document_from_bytes(b"data", "report.pdf")
-        assert "report.pdf" in os.path.basename(path)
+        basename = os.path.basename(path)
+        assert basename.startswith("doc_")
+        assert basename.endswith(".pdf")
+        assert "report" not in basename
 
-    def test_empty_filename_uses_fallback(self):
+    def test_empty_filename_uses_opaque_path(self):
         path = cache_document_from_bytes(b"data", "")
-        assert "document" in os.path.basename(path)
+        basename = os.path.basename(path)
+        assert basename.startswith("doc_")
+        assert "document" not in basename
 
     def test_unique_filenames(self):
         p1 = cache_document_from_bytes(b"a", "same.txt")
@@ -72,10 +77,11 @@ class TestCacheDocumentFromBytes:
         assert p1 != p2
 
     def test_path_traversal_blocked(self):
-        """Malicious directory components are stripped — only the leaf name survives."""
+        """Malicious directory components are stripped before deriving metadata."""
         path = cache_document_from_bytes(b"data", "../../etc/passwd")
         basename = os.path.basename(path)
-        assert "passwd" in basename
+        assert basename.startswith("doc_")
+        assert "passwd" not in basename
         # Must NOT contain directory separators
         assert ".." not in basename
         # File must reside inside the cache directory
@@ -86,17 +92,39 @@ class TestCacheDocumentFromBytes:
         path = cache_document_from_bytes(b"data", "file\x00.pdf")
         basename = os.path.basename(path)
         assert "\x00" not in basename
-        assert "file.pdf" in basename
+        assert basename.endswith(".pdf")
 
     def test_dot_dot_filename_handled(self):
-        """A filename that is literally '..' falls back to 'document'."""
+        """A filename that is literally '..' still gets an opaque cache path."""
         path = cache_document_from_bytes(b"data", "..")
         basename = os.path.basename(path)
-        assert "document" in basename
+        assert basename.startswith("doc_")
 
     def test_none_filename_uses_fallback(self):
         path = cache_document_from_bytes(b"data", None)
-        assert "document" in os.path.basename(path)
+        assert os.path.basename(path).startswith("doc_")
+
+    def test_long_filename_not_copied_to_path(self):
+        long_stem = "论证式教学在高中生物学教学设计中的实践应用_" * 20
+        path = cache_document_from_bytes(b"data", f"{long_stem}.docx")
+        basename = os.path.basename(path)
+
+        assert os.path.exists(path)
+        assert basename.startswith("doc_")
+        assert basename.endswith(".docx")
+        assert "论证式教学" not in basename
+        assert len(basename.encode("utf-8")) < 255
+
+    def test_long_percent_encoded_filename_not_copied_to_path(self):
+        long_name = ("%E8%AE%BA%E8%AF%81%E5%BC%8F%E6%95%99%E5%AD%A6_" * 20) + "%E.docx"
+        path = cache_document_from_bytes(b"data", long_name)
+        basename = os.path.basename(path)
+
+        assert os.path.exists(path)
+        assert basename.startswith("doc_")
+        assert basename.endswith(".docx")
+        assert "%" not in basename
+        assert len(basename.encode("utf-8")) < 255
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +179,79 @@ class TestSupportedDocumentTypes:
 
     @pytest.mark.parametrize(
         "ext",
-        [".pdf", ".md", ".txt", ".zip", ".docx", ".xlsx", ".pptx"],
+        [
+            ".pdf",
+            ".md",
+            ".txt",
+            ".zip",
+            ".doc",
+            ".docx",
+            ".xls",
+            ".xlsx",
+            ".ppt",
+            ".pptx",
+        ],
     )
     def test_expected_extensions_present(self, ext):
         assert ext in SUPPORTED_DOCUMENT_TYPES
+
+
+# ---------------------------------------------------------------------------
+# TestCacheMediaBytes — the unified, platform-agnostic caching primitive
+# ---------------------------------------------------------------------------
+
+# 1x1 transparent PNG (passes cache_image_from_bytes validation)
+_PNG_1PX = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+    "890000000d49444154789c6360000002000154a24f5f0000000049454e44ae426082"
+)
+
+
+class TestCacheMediaBytes:
+    def test_pdf_routes_to_document(self):
+        from gateway.platforms.base import cache_media_bytes
+        result = cache_media_bytes(b"%PDF-1.4 body", filename="report.pdf", mime_type="application/pdf")
+        assert result is not None
+        assert result.kind == "document"
+        assert result.media_type == "application/pdf"
+        assert "report.pdf" in result.display_name
+        assert os.path.exists(result.path)
+        assert "report.pdf" in result.context_note()
+
+    def test_png_routes_to_image(self):
+        from gateway.platforms.base import cache_media_bytes
+        result = cache_media_bytes(_PNG_1PX, filename="photo.png", mime_type="image/png")
+        assert result is not None
+        assert result.kind == "image"
+        assert result.media_type == "image/png"
+        assert os.path.exists(result.path)
+
+    def test_native_photo_without_filename_uses_default_kind(self):
+        from gateway.platforms.base import cache_media_bytes
+        result = cache_media_bytes(_PNG_1PX, filename="", mime_type="", default_kind="image")
+        assert result is not None
+        assert result.kind == "image"
+
+    def test_mp4_routes_to_video(self):
+        from gateway.platforms.base import cache_media_bytes
+        result = cache_media_bytes(b"\x00\x00\x00\x18ftypmp42", filename="clip.mp4", mime_type="video/mp4")
+        assert result is not None
+        assert result.kind == "video"
+        assert result.media_type == "video/mp4"
+
+    def test_mime_only_resolves_extension(self):
+        from gateway.platforms.base import cache_media_bytes
+        result = cache_media_bytes(b"col1,col2\n1,2", filename="", mime_type="text/csv")
+        assert result is not None
+        assert result.kind == "document"
+        assert result.media_type == "text/csv"
+
+    def test_unsupported_document_returns_none(self):
+        from gateway.platforms.base import cache_media_bytes
+        result = cache_media_bytes(b"MZ", filename="malware.exe", mime_type="application/x-msdownload")
+        assert result is None
+
+    def test_invalid_image_returns_none(self):
+        from gateway.platforms.base import cache_media_bytes
+        result = cache_media_bytes(b"<html>not an image</html>", filename="x.png", mime_type="image/png")
+        assert result is None

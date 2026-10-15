@@ -1,6 +1,8 @@
 """Tests for the WeCom platform adapter."""
 
+import asyncio
 import base64
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import PlatformConfig
 from gateway.platforms.base import SendResult
 
 
@@ -284,6 +286,39 @@ class TestPolicyHelpers:
         assert adapter._is_dm_allowed("user-1") is True
         assert adapter._is_dm_allowed("user-2") is False
 
+    def test_dm_allowlist_honors_env_only_allowed_users(self, monkeypatch):
+        """Env-only setup (WECOM_DM_POLICY + WECOM_ALLOWED_USERS, no config
+        ``extra``) must populate the DM allowlist. Otherwise ``dm_policy:
+        allowlist`` runs with an empty allowlist and drops every listed user
+        at intake — the documented env vars become no-ops."""
+        from gateway.platforms.wecom import WeComAdapter
+
+        monkeypatch.setenv("WECOM_DM_POLICY", "allowlist")
+        monkeypatch.setenv("WECOM_ALLOWED_USERS", "user-1, user-2")
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+
+        assert adapter._dm_policy == "allowlist"
+        assert adapter._allow_from == ["user-1", "user-2"]
+        assert adapter._is_dm_allowed("user-1") is True
+        assert adapter._is_dm_allowed("user-2") is True
+        assert adapter._is_dm_allowed("stranger") is False
+
+    def test_dm_allowlist_extra_takes_precedence_over_env(self, monkeypatch):
+        """Config ``extra`` wins over the env fallback, so an explicit
+        allowlist is never silently widened by a stray WECOM_ALLOWED_USERS."""
+        from gateway.platforms.wecom import WeComAdapter
+
+        monkeypatch.setenv("WECOM_ALLOWED_USERS", "env-user")
+
+        adapter = WeComAdapter(
+            PlatformConfig(enabled=True, extra={"dm_policy": "allowlist", "allow_from": ["cfg-user"]})
+        )
+
+        assert adapter._allow_from == ["cfg-user"]
+        assert adapter._is_dm_allowed("cfg-user") is True
+        assert adapter._is_dm_allowed("env-user") is False
+
     def test_group_allowlist_and_per_group_sender_allowlist(self):
         from gateway.platforms.wecom import WeComAdapter
 
@@ -340,9 +375,10 @@ class TestMediaHelpers:
         encryptor = Cipher(algorithms.AES(key), modes.CBC(key[:16])).encryptor()
         encrypted = encryptor.update(padded) + encryptor.finalize()
 
-        decrypted = WeComAdapter._decrypt_file_bytes(encrypted, base64.b64encode(key).decode("ascii"))
+        for aes_key in (base64.b64encode(key).decode("ascii"), key.hex()):
+            decrypted = WeComAdapter._decrypt_file_bytes(encrypted, aes_key)
 
-        assert decrypted == plaintext
+            assert decrypted == plaintext
 
     @pytest.mark.asyncio
     async def test_load_outbound_media_rejects_placeholder_path(self):
@@ -460,7 +496,7 @@ class TestMediaUpload:
             "file",
             {
                 "url": "https://example.com/secret.bin",
-                "aeskey": base64.b64encode(key).decode("ascii"),
+                "aeskey": key.hex(),
             },
         )
 
@@ -551,6 +587,158 @@ class TestSend:
 
 
 class TestInboundMessages:
+    @pytest.mark.asyncio
+    async def test_extract_media_collects_mixed_file(self, monkeypatch):
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        calls = []
+
+        async def fake_cache(kind, ref, *, source=""):
+            calls.append((kind, source, dict(ref)))
+            return f"/tmp/{source.replace('.', '_')}", "application/pdf"
+
+        monkeypatch.setattr(adapter, "_cache_media", fake_cache)
+
+        paths, types = await adapter._extract_media(
+            {
+                "msgtype": "mixed",
+                "mixed": {
+                    "msg_item": [
+                        {"msgtype": "text", "text": {"content": "see file"}},
+                        {
+                            "msgtype": "file",
+                            "file": {
+                                "url": "https://example.com/document",
+                                "aeskey": "redacted",
+                            },
+                        },
+                    ]
+                },
+            }
+        )
+
+        assert paths == ["/tmp/body_mixed[1]_file"]
+        assert types == ["application/pdf"]
+        assert calls == [
+            (
+                "file",
+                "body.mixed[1].file",
+                {"url": "https://example.com/document", "aeskey": "redacted"},
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_extract_media_collects_quoted_mixed_file(self, monkeypatch):
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        calls = []
+
+        async def fake_cache(kind, ref, *, source=""):
+            calls.append((kind, source, dict(ref)))
+            return f"/tmp/{source.replace('.', '_')}", "application/pdf"
+
+        monkeypatch.setattr(adapter, "_cache_media", fake_cache)
+
+        paths, types = await adapter._extract_media(
+            {
+                "msgtype": "text",
+                "text": {"content": "看看上面这个文件"},
+                "quote": {
+                    "msgtype": "mixed",
+                    "mixed": {
+                        "msg_item": [
+                            {
+                                "msgtype": "file",
+                                "file": {
+                                    "url": "https://example.com/quoted-doc",
+                                    "aeskey": "redacted",
+                                },
+                            }
+                        ]
+                    },
+                },
+            }
+        )
+
+        assert paths == ["/tmp/quote_mixed[0]_file"]
+        assert types == ["application/pdf"]
+        assert calls == [
+            (
+                "file",
+                "quote.mixed[0].file",
+                {"url": "https://example.com/quoted-doc", "aeskey": "redacted"},
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_extract_media_logs_no_url_metadata_without_secret_values(self, caplog):
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        caplog.set_level(logging.INFO, logger="gateway.platforms.wecom")
+
+        paths, types = await adapter._extract_media(
+            {
+                "msgtype": "file",
+                "chattype": "single",
+                "file": {
+                    "media_id": "media-id-value",
+                    "aeskey": "secret-aes-value",
+                },
+            }
+        )
+
+        assert paths == []
+        assert types == []
+        assert "not cacheable" in caplog.text
+        assert "has_media_id=True" in caplog.text
+        assert "has_aeskey=True" in caplog.text
+        assert "media-id-value" not in caplog.text
+        assert "secret-aes-value" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_cache_media_download_log_does_not_include_url_query(self, caplog):
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        caplog.set_level(logging.WARNING, logger="gateway.platforms.wecom")
+
+        cached = await adapter._cache_media(
+            "file",
+            {"url": "http://127.0.0.1/private?secret=secret-token"},
+            source="body.file",
+        )
+
+        assert cached is None
+        assert "Failed to download WeCom inbound media" in caplog.text
+        assert "secret-token" not in caplog.text
+        assert "?secret=" not in caplog.text
+        assert "http://127.0.0.1/.../private" in caplog.text
+
+    def test_extract_text_includes_quoted_mixed_text(self):
+        from gateway.platforms.wecom import WeComAdapter
+
+        text, reply_text = WeComAdapter._extract_text(
+            {
+                "msgtype": "text",
+                "text": {"content": "这是什么"},
+                "quote": {
+                    "msgtype": "mixed",
+                    "mixed": {
+                        "msg_item": [
+                            {"msgtype": "text", "text": {"content": "文件说明"}},
+                            {"msgtype": "image", "image": {"url": "https://example.com/i"}},
+                        ]
+                    },
+                },
+            }
+        )
+
+        assert text == "这是什么"
+        assert reply_text == "文件说明"
+
     @pytest.mark.asyncio
     async def test_on_message_builds_event(self):
         from gateway.platforms.wecom import WeComAdapter
@@ -831,3 +1019,91 @@ class TestWeComZombieSessionFix:
         cmd = adapter._send_request.await_args.args[0]
         assert cmd == APP_CMD_SEND
 
+
+
+class TestTextBatchFlushRace:
+    """Regression tests for the cancel-delivery race in _flush_text_batch.
+
+    When asyncio.sleep() fires and Task.cancel() is called before the task
+    runs, CPython sets _must_cancel but cannot cancel the already-done sleep
+    future.  CancelledError is then delivered at the *next* await
+    (handle_message), after the task has already popped the event — the
+    superseding task sees an empty batch and silently drops the message.
+    The fix adds a synchronous task-registry check between the sleep and
+    the pop so a superseded task returns before touching the event.
+    """
+
+    @pytest.mark.asyncio
+    async def test_superseded_task_does_not_pop_or_process_event(self):
+        """A flush task that has been superseded must leave the event in the
+        batch dict for the new task to handle."""
+        from gateway.platforms.base import MessageEvent, MessageType
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._text_batch_delay_seconds = 0
+
+        key = "test-session"
+        event = MessageEvent(text="hello", message_type=MessageType.TEXT)
+        adapter._pending_text_batches[key] = event
+
+        handle_calls = []
+
+        async def fake_handle(evt):
+            handle_calls.append(evt)
+
+        adapter.handle_message = fake_handle
+
+        # Create T1 and register it.
+        t1 = asyncio.create_task(adapter._flush_text_batch(key))
+        adapter._pending_text_batch_tasks[key] = t1
+
+        # Simulate T2 superseding T1 before T1 wakes from sleep.
+        t2 = asyncio.create_task(asyncio.sleep(9999))
+        adapter._pending_text_batch_tasks[key] = t2
+
+        # Yield long enough for T1's sleep(0) to complete and T1 to run.
+        await asyncio.sleep(0.05)
+
+        t2.cancel()
+        try:
+            await t2
+        except asyncio.CancelledError:
+            pass
+
+        # T1 must have returned without processing or removing the event.
+        assert handle_calls == [], "superseded task must not call handle_message"
+        assert adapter._pending_text_batches.get(key) is event, (
+            "superseded task must not pop the event"
+        )
+
+    @pytest.mark.asyncio
+    async def test_active_task_processes_event_normally(self):
+        """When the task is not superseded it must still process the event."""
+        from gateway.platforms.base import MessageEvent, MessageType
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._text_batch_delay_seconds = 0
+
+        key = "test-session"
+        event = MessageEvent(text="world", message_type=MessageType.TEXT)
+        adapter._pending_text_batches[key] = event
+
+        handle_calls = []
+
+        async def fake_handle(evt):
+            handle_calls.append(evt)
+
+        adapter.handle_message = fake_handle
+
+        t1 = asyncio.create_task(adapter._flush_text_batch(key))
+        adapter._pending_text_batch_tasks[key] = t1
+
+        # No superseding task — T1 should process normally.
+        await asyncio.sleep(0.05)
+
+        assert handle_calls == [event], "active task must call handle_message"
+        assert adapter._pending_text_batches.get(key) is None, (
+            "active task must pop the event after processing"
+        )

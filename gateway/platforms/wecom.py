@@ -67,6 +67,7 @@ from gateway.platforms.base import (
     SendResult,
     cache_document_from_bytes,
     cache_image_from_bytes,
+    safe_url_for_log,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,7 +162,15 @@ class WeComAdapter(BasePlatformAdapter):
         ).strip() or DEFAULT_WS_URL
 
         self._dm_policy = str(extra.get("dm_policy") or os.getenv("WECOM_DM_POLICY", "open")).strip().lower()
-        self._allow_from = _coerce_list(extra.get("allow_from") or extra.get("allowFrom"))
+        # dm_policy already honors WECOM_DM_POLICY, so the allowlist must honor
+        # WECOM_ALLOWED_USERS too. Without the env fallback an env-only setup
+        # (dm_policy=allowlist via env, no config extra) runs with an empty
+        # allowlist and drops every authorized DM at intake.
+        self._allow_from = _coerce_list(
+            extra.get("allow_from")
+            or extra.get("allowFrom")
+            or os.getenv("WECOM_ALLOWED_USERS", "")
+        )
 
         self._group_policy = str(extra.get("group_policy") or os.getenv("WECOM_GROUP_POLICY", "open")).strip().lower()
         self._group_allow_from = _coerce_list(extra.get("group_allow_from") or extra.get("groupAllowFrom"))
@@ -295,7 +304,7 @@ class WeComAdapter(BasePlatformAdapter):
 
         auth_payload = await self._wait_for_handshake(req_id)
         errcode = auth_payload.get("errcode", 0)
-        if errcode not in (0, None):
+        if errcode not in {0, None}:
             errmsg = auth_payload.get("errmsg", "authentication failed")
             raise RuntimeError(f"{errmsg} (errcode={errcode})")
 
@@ -320,7 +329,7 @@ class WeComAdapter(BasePlatformAdapter):
                 if self._payload_req_id(payload) == req_id:
                     return payload
                 logger.debug("[%s] Ignoring pre-auth payload: %s", self.name, payload.get("cmd"))
-            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+            elif msg.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR}:
                 raise RuntimeError("WeCom websocket closed during authentication")
 
     async def _listen_loop(self) -> None:
@@ -345,6 +354,7 @@ class WeComAdapter(BasePlatformAdapter):
                 try:
                     await self._open_connection()
                     backoff_idx = 0
+                    self._mark_connected()
                     logger.info("[%s] Reconnected", self.name)
                 except Exception as reconnect_exc:
                     logger.warning("[%s] Reconnect failed: %s", self.name, reconnect_exc)
@@ -360,7 +370,7 @@ class WeComAdapter(BasePlatformAdapter):
                 payload = self._parse_json(msg.data)
                 if payload:
                     await self._dispatch_payload(payload)
-            elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+            elif msg.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSING}:
                 raise RuntimeError("WeCom websocket closed")
 
     async def _heartbeat_loop(self) -> None:
@@ -615,6 +625,18 @@ class WeComAdapter(BasePlatformAdapter):
             else:
                 delay = self._text_batch_delay_seconds
             await asyncio.sleep(delay)
+            # Guard against the cancel-delivery race: when the sleep timer
+            # fires just before cancel() is called, CPython sets
+            # Task._must_cancel but cannot cancel the already-done sleep
+            # future, so CancelledError is delivered at the *next* await
+            # (handle_message) rather than here.  By that point this task
+            # has already popped the merged event, so the superseding task
+            # sees an empty batch and silently drops the message.
+            # This check is synchronous — no await between the sleep and
+            # the pop — so no other coroutine can modify the task registry
+            # in between.
+            if self._pending_text_batch_tasks.get(key) is not current_task:
+                return
             event = self._pending_text_batches.pop(key, None)
             if not event:
                 return
@@ -627,27 +649,34 @@ class WeComAdapter(BasePlatformAdapter):
             if self._pending_text_batch_tasks.get(key) is current_task:
                 self._pending_text_batch_tasks.pop(key, None)
 
-    @staticmethod
-    def _extract_text(body: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    @classmethod
+    def _extract_mixed_text_parts(cls, body: Dict[str, Any]) -> List[str]:
+        """Extract text items from a WeCom ``mixed`` message body."""
+        mixed = body.get("mixed") if isinstance(body.get("mixed"), dict) else {}
+        items = mixed.get("msg_item") if isinstance(mixed.get("msg_item"), list) else []
+        parts: List[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("msgtype") or "").lower()
+            if item_type == "text":
+                text_block = item.get("text") if isinstance(item.get("text"), dict) else {}
+                content = str(text_block.get("content") or "").strip()
+                if content:
+                    parts.append(content)
+            elif item_type == "mixed":
+                parts.extend(cls._extract_mixed_text_parts(item))
+        return parts
+
+    @classmethod
+    def _extract_text(cls, body: Dict[str, Any]) -> Tuple[str, Optional[str]]:
         """Extract plain text and quoted text from a callback payload."""
         text_parts: List[str] = []
         reply_text: Optional[str] = None
         msgtype = str(body.get("msgtype") or "").lower()
 
         if msgtype == "mixed":
-            _raw_mixed = body.get("mixed")
-            mixed = _raw_mixed if isinstance(_raw_mixed, dict) else {}
-            _raw_items = mixed.get("msg_item")
-            items = _raw_items if isinstance(_raw_items, list) else []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                if str(item.get("msgtype") or "").lower() == "text":
-                    _raw_text = item.get("text")
-                    text_block = _raw_text if isinstance(_raw_text, dict) else {}
-                    content = str(text_block.get("content") or "").strip()
-                    if content:
-                        text_parts.append(content)
+            text_parts.extend(cls._extract_mixed_text_parts(body))
         else:
             text_block = body.get("text") if isinstance(body.get("text"), dict) else {}
             content = str(text_block.get("content") or "").strip()
@@ -675,105 +704,263 @@ class WeComAdapter(BasePlatformAdapter):
         elif quote_type == "voice":
             quote_voice = quote.get("voice") if isinstance(quote.get("voice"), dict) else {}
             reply_text = str(quote_voice.get("content") or "").strip() or None
+        elif quote_type == "mixed":
+            quote_parts = cls._extract_mixed_text_parts(quote)
+            reply_text = "\n".join(quote_parts).strip() or None
 
         return "\n".join(part for part in text_parts if part).strip(), reply_text
+
+    @staticmethod
+    def _dict_keys(value: Any) -> List[str]:
+        """Return sorted safe key names for diagnostics."""
+        if not isinstance(value, dict):
+            return []
+        return sorted(str(key) for key in value.keys())
+
+    @classmethod
+    def _collect_media_refs(
+        cls,
+        body: Dict[str, Any],
+        source: str,
+    ) -> List[Tuple[str, Dict[str, Any], str]]:
+        """Collect cacheable media references from a WeCom body-like dict."""
+        refs: List[Tuple[str, Dict[str, Any], str]] = []
+        msgtype = str(body.get("msgtype") or "").lower()
+
+        if msgtype == "mixed":
+            mixed = body.get("mixed") if isinstance(body.get("mixed"), dict) else {}
+            items = mixed.get("msg_item") if isinstance(mixed.get("msg_item"), list) else []
+            for index, item in enumerate(items):
+                if isinstance(item, dict):
+                    refs.extend(cls._collect_media_refs(item, f"{source}.mixed[{index}]"))
+            return refs
+
+        for kind in ("image", "file", "video"):
+            media = body.get(kind)
+            if isinstance(media, dict):
+                refs.append((kind, media, f"{source}.{kind}"))
+
+        appmsg = body.get("appmsg") if isinstance(body.get("appmsg"), dict) else None
+        if appmsg:
+            refs.extend(cls._collect_media_refs(appmsg, f"{source}.appmsg"))
+
+        return refs
+
+    @classmethod
+    def _has_media_signal(cls, body: Dict[str, Any]) -> bool:
+        """Return true when an inbound payload looks media-related."""
+        if not isinstance(body, dict):
+            return False
+        msgtype = str(body.get("msgtype") or "").lower()
+        if msgtype in {"image", "file", "video", "mixed", "appmsg"}:
+            return True
+        if any(isinstance(body.get(key), dict) for key in ("image", "file", "video", "appmsg")):
+            return True
+        quote = body.get("quote") if isinstance(body.get("quote"), dict) else None
+        if quote:
+            quote_type = str(quote.get("msgtype") or "").lower()
+            if quote_type in {"image", "file", "video", "mixed", "appmsg"}:
+                return True
+            if any(isinstance(quote.get(key), dict) for key in ("image", "file", "video", "appmsg")):
+                return True
+        return False
+
+    @classmethod
+    def _media_ref_metadata(
+        cls,
+        kind: str,
+        ref: Dict[str, Any],
+        source: str,
+    ) -> Dict[str, Any]:
+        """Build content-safe metadata for an inbound media reference."""
+        return {
+            "source": source,
+            "kind": kind,
+            "keys": cls._dict_keys(ref),
+            "has_url": bool(str(ref.get("url") or "").strip()),
+            "has_base64": bool(ref.get("base64")),
+            "has_aeskey": bool(ref.get("aeskey")),
+            "has_media_id": bool(ref.get("media_id") or ref.get("mediaid")),
+            "has_filename": bool(ref.get("filename") or ref.get("name")),
+        }
 
     async def _extract_media(self, body: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         """Best-effort extraction of inbound media to local cache paths."""
         media_paths: List[str] = []
         media_types: List[str] = []
-        refs: List[Tuple[str, Dict[str, Any]]] = []
+        refs: List[Tuple[str, Dict[str, Any], str]] = []
         msgtype = str(body.get("msgtype") or "").lower()
 
-        if msgtype == "mixed":
-            _raw_mixed = body.get("mixed")
-            mixed = _raw_mixed if isinstance(_raw_mixed, dict) else {}
-            _raw_items = mixed.get("msg_item")
-            items = _raw_items if isinstance(_raw_items, list) else []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                item_type = str(item.get("msgtype") or "").lower()
-                if item_type == "image" and isinstance(item.get("image"), dict):
-                    refs.append(("image", item["image"]))
-        else:
-            if isinstance(body.get("image"), dict):
-                refs.append(("image", body["image"]))
-            if msgtype == "file" and isinstance(body.get("file"), dict):
-                refs.append(("file", body["file"]))
-            # Handle appmsg (WeCom AI Bot attachments with PDF/Word/Excel)
-            if msgtype == "appmsg" and isinstance(body.get("appmsg"), dict):
-                appmsg = body["appmsg"]
-                if isinstance(appmsg.get("file"), dict):
-                    refs.append(("file", appmsg["file"]))
-                elif isinstance(appmsg.get("image"), dict):
-                    refs.append(("image", appmsg["image"]))
+        refs.extend(self._collect_media_refs(body, "body"))
 
         quote = body.get("quote") if isinstance(body.get("quote"), dict) else {}
-        quote_type = str(quote.get("msgtype") or "").lower()
-        if quote_type == "image" and isinstance(quote.get("image"), dict):
-            refs.append(("image", quote["image"]))
-        elif quote_type == "file" and isinstance(quote.get("file"), dict):
-            refs.append(("file", quote["file"]))
+        if quote:
+            refs.extend(self._collect_media_refs(quote, "quote"))
 
-        for kind, ref in refs:
-            cached = await self._cache_media(kind, ref)
+        for kind, ref, source in refs:
+            cached = await self._cache_media(kind, ref, source=source)
             if cached:
                 path, content_type = cached
                 media_paths.append(path)
                 media_types.append(content_type)
 
+        if refs or self._has_media_signal(body):
+            ref_meta = [
+                self._media_ref_metadata(kind, ref, source)
+                for kind, ref, source in refs
+            ]
+            quote_type = str(quote.get("msgtype") or "").lower() if quote else ""
+            logger.info(
+                "[%s] WeCom inbound media metadata: msgtype=%s chattype=%s "
+                "body_keys=%s quote_type=%s refs=%d cached=%d ref_meta=%s",
+                self.name,
+                msgtype,
+                str(body.get("chattype") or ""),
+                self._dict_keys(body),
+                quote_type,
+                len(refs),
+                len(media_paths),
+                json.dumps(ref_meta, ensure_ascii=False, sort_keys=True),
+            )
+
         return media_paths, media_types
 
-    async def _cache_media(self, kind: str, media: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    async def _cache_media(
+        self,
+        kind: str,
+        media: Dict[str, Any],
+        *,
+        source: str = "",
+    ) -> Optional[Tuple[str, str]]:
         """Cache an inbound image/file/media reference to local storage."""
         if "base64" in media and media.get("base64"):
             try:
                 raw = self._decode_base64(media["base64"])
             except Exception as exc:
-                logger.debug("[%s] Failed to decode %s base64 media: %s", self.name, kind, exc)
+                logger.warning(
+                    "[%s] Failed to decode WeCom inbound media base64: kind=%s source=%s keys=%s error=%s",
+                    self.name,
+                    kind,
+                    source,
+                    self._dict_keys(media),
+                    exc,
+                )
                 return None
 
             if kind == "image":
                 ext = self._detect_image_ext(raw)
                 try:
-                    return cache_image_from_bytes(raw, ext), self._mime_for_ext(ext, fallback="image/jpeg")
+                    path = cache_image_from_bytes(raw, ext)
+                    content_type = self._mime_for_ext(ext, fallback="image/jpeg")
+                    logger.info(
+                        "[%s] Cached WeCom inbound media: kind=%s source=%s transport=base64 bytes=%d content_type=%s ext=%s",
+                        self.name,
+                        kind,
+                        source,
+                        len(raw),
+                        content_type,
+                        ext,
+                    )
+                    return path, content_type
                 except ValueError as exc:
                     logger.warning("[%s] Rejected non-image bytes: %s", self.name, exc)
                     return None
 
             filename = str(media.get("filename") or media.get("name") or "wecom_file")
-            return cache_document_from_bytes(raw, filename), mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            path = cache_document_from_bytes(raw, filename)
+            content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            logger.info(
+                "[%s] Cached WeCom inbound media: kind=%s source=%s transport=base64 bytes=%d content_type=%s ext=%s",
+                self.name,
+                kind,
+                source,
+                len(raw),
+                content_type,
+                Path(filename).suffix.lower() or "",
+            )
+            return path, content_type
 
         url = str(media.get("url") or "").strip()
         if not url:
+            logger.info(
+                "[%s] WeCom inbound media ref is not cacheable: kind=%s source=%s keys=%s has_media_id=%s has_aeskey=%s",
+                self.name,
+                kind,
+                source,
+                self._dict_keys(media),
+                bool(media.get("media_id") or media.get("mediaid")),
+                bool(media.get("aeskey")),
+            )
             return None
 
         try:
             raw, headers = await self._download_remote_bytes(url, max_bytes=ABSOLUTE_MAX_BYTES)
         except Exception as exc:
-            logger.debug("[%s] Failed to download %s from %s: %s", self.name, kind, url, exc)
+            safe_url = safe_url_for_log(url)
+            error_detail = str(exc).replace(url, safe_url)
+            logger.warning(
+                "[%s] Failed to download WeCom inbound media: kind=%s source=%s url=%s error_type=%s error=%s",
+                self.name,
+                kind,
+                source,
+                safe_url,
+                type(exc).__name__,
+                error_detail,
+            )
             return None
 
+        encrypted_bytes = len(raw)
         aes_key = str(media.get("aeskey") or "").strip()
         if aes_key:
             try:
                 raw = self._decrypt_file_bytes(raw, aes_key)
             except Exception as exc:
-                logger.debug("[%s] Failed to decrypt %s from %s: %s", self.name, kind, url, exc)
+                logger.warning(
+                    "[%s] Failed to decrypt WeCom inbound media: kind=%s source=%s url=%s error=%s",
+                    self.name,
+                    kind,
+                    source,
+                    safe_url_for_log(url),
+                    exc,
+                )
                 return None
 
         content_type = str(headers.get("content-type") or "").split(";", 1)[0].strip() or "application/octet-stream"
         if kind == "image":
             ext = self._guess_extension(url, content_type, fallback=self._detect_image_ext(raw))
             try:
-                return cache_image_from_bytes(raw, ext), content_type or self._mime_for_ext(ext, fallback="image/jpeg")
+                path = cache_image_from_bytes(raw, ext)
+                resolved_type = content_type or self._mime_for_ext(ext, fallback="image/jpeg")
+                logger.info(
+                    "[%s] Cached WeCom inbound media: kind=%s source=%s transport=url encrypted_bytes=%d bytes=%d content_type=%s ext=%s had_aeskey=%s",
+                    self.name,
+                    kind,
+                    source,
+                    encrypted_bytes,
+                    len(raw),
+                    resolved_type,
+                    ext,
+                    bool(aes_key),
+                )
+                return path, resolved_type
             except ValueError as exc:
-                logger.warning("[%s] Rejected non-image bytes from %s: %s", self.name, url, exc)
+                logger.warning("[%s] Rejected non-image bytes from %s: %s", self.name, safe_url_for_log(url), exc)
                 return None
 
         filename = self._guess_filename(url, headers.get("content-disposition"), content_type)
-        return cache_document_from_bytes(raw, filename), content_type
+        path = cache_document_from_bytes(raw, filename)
+        logger.info(
+            "[%s] Cached WeCom inbound media: kind=%s source=%s transport=url encrypted_bytes=%d bytes=%d content_type=%s ext=%s had_aeskey=%s",
+            self.name,
+            kind,
+            source,
+            encrypted_bytes,
+            len(raw),
+            content_type,
+            Path(filename).suffix.lower() or "",
+            bool(aes_key),
+        )
+        return path, content_type
 
     @staticmethod
     def _decode_base64(data: str) -> bytes:
@@ -833,6 +1020,11 @@ class WeComAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
     # Policy helpers
     # ------------------------------------------------------------------
+
+    @property
+    def enforces_own_access_policy(self) -> bool:
+        """WeCom gates DM/group access at intake via dm_policy/group_policy."""
+        return True
 
     def _is_dm_allowed(self, sender_id: str) -> bool:
         if self._dm_policy == "disabled":
@@ -998,7 +1190,7 @@ class WeComAdapter(BasePlatformAdapter):
     @staticmethod
     def _response_error(response: Dict[str, Any]) -> Optional[str]:
         errcode = response.get("errcode", 0)
-        if errcode in (0, None):
+        if errcode in {0, None}:
             return None
         errmsg = str(response.get("errmsg") or "unknown error")
         return f"WeCom errcode {errcode}: {errmsg}"
@@ -1016,9 +1208,7 @@ class WeComAdapter(BasePlatformAdapter):
         if not aes_key:
             raise ValueError("aes_key is required")
 
-        # WeCom doesn't pad base64 keys; add padding if needed
-        aes_key = aes_key + '=' * ((4 - len(aes_key) % 4) % 4)
-        key = base64.b64decode(aes_key)
+        key = WeComAdapter._decode_aes_key(aes_key)
         if len(key) != 32:
             raise ValueError(f"Invalid WeCom AES key length: expected 32 bytes, got {len(key)}")
 
@@ -1038,6 +1228,18 @@ class WeComAdapter(BasePlatformAdapter):
             raise ValueError("Invalid PKCS#7 padding: padding bytes mismatch")
 
         return decrypted[:-pad_len]
+
+    @staticmethod
+    def _decode_aes_key(aes_key: str) -> bytes:
+        key_text = str(aes_key or "").strip()
+        if re.fullmatch(r"[0-9a-fA-F]{64}", key_text):
+            return bytes.fromhex(key_text)
+
+        padded = key_text + ("=" * (-len(key_text) % 4))
+        try:
+            return base64.b64decode(padded, validate=True)
+        except Exception:
+            return base64.urlsafe_b64decode(padded)
 
     async def _download_remote_bytes(
         self,
