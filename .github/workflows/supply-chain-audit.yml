@@ -147,6 +147,18 @@ jobs:
           # and produced false positives that trained reviewers to ignore the scanner.
           SETUP_HITS=$(git diff --name-only "$BASE"..."$HEAD" | grep -E '^(setup\.py|setup\.cfg|sitecustomize\.py|usercustomize\.py|__init__\.pth)$' || true)
           if [ -n "$SETUP_HITS" ]; then
+            # Only install hooks have a review disposition. Earlier findings
+            # (.pth, encoded execution/subprocess) remain unconditionally blocking.
+            printf '%s\n' "$SETUP_HITS" > /tmp/install-hook-paths.txt
+            if [ -z "$FINDINGS" ] && python3 .github/scripts/verify_install_hook_review.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --pr "${{ github.event.pull_request.number }}" \
+              --head "$HEAD" --hooks-file /tmp/install-hook-paths.txt; then
+              echo "Exact-head/content repository-owner install-hook review verified."
+              SETUP_HITS=""
+            fi
+          fi
+          if [ -n "$SETUP_HITS" ]; then
             FINDINGS="${FINDINGS}
           ### 🚨 CRITICAL: Install-hook file added or modified
           These files can execute code during package installation or interpreter startup.

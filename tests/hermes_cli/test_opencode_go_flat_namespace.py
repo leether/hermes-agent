@@ -108,7 +108,7 @@ def test_openrouter_still_prepends_vendor():
 # ---------------------------------------------------------------------------
 
 
-def _run_switch(raw_input: str, **extra):
+def _run_switch(raw_input: str, *, validation_models=None, **extra):
     """Call switch_model with opencode-go as current provider, mocking the
     live catalog so the test doesn't hit the network."""
     defaults = dict(
@@ -126,9 +126,14 @@ def _run_switch(raw_input: str, **extra):
         # For other providers, return empty so tests don't depend on them.
         return []
 
+    # Selection and subsequent validation use different catalog readers.
+    # Mock both; a live second probe would make version correction network-dependent.
     with patch(
         "hermes_cli.model_switch.list_provider_models",
         side_effect=fake_list_provider_models,
+    ), patch(
+        "hermes_cli.models.fetch_api_models",
+        return_value=list(_OPENCODE_GO_LIVE if validation_models is None else validation_models),
     ):
         return switch_model(raw_input=raw_input, **defaults)
 
@@ -157,3 +162,22 @@ def test_kimi_k2_6_stays_on_opencode_go():
     result = _run_switch("kimi-k2.6", current_model="deepseek-v4-pro")
     assert result.target_provider == "opencode-go"
     assert result.new_model == "kimi-k2.6"
+
+
+def test_validation_can_correct_changed_catalog_without_switching_provider():
+    result = _run_switch(
+        "deepseek-v4-flash", validation_models=["deepseek-v4.1-flash"],
+    )
+    assert result.success
+    assert result.target_provider == "opencode-go"
+    assert result.new_model == "deepseek-v4.1-flash"
+
+
+def test_catalog_selection_and_validation_do_not_open_network():
+    with patch("socket.create_connection", side_effect=AssertionError("unexpected network")) as create, \
+            patch("socket.socket.connect", side_effect=AssertionError("unexpected network")) as connect:
+        result = _run_switch("deepseek-v4-flash")
+    create.assert_not_called()
+    connect.assert_not_called()
+    assert result.success
+    assert result.new_model == "deepseek-v4-flash"

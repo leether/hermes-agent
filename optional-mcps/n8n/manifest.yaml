@@ -28,11 +28,11 @@ install:
   type: git
   url: https://github.com/CyberSamuraiX/hermes-n8n-mcp.git
   # Pin to a commit/tag. Required — manifests do not float HEAD.
-  ref: main
+  ref: 7a9ae00795593aa1fdb4e61ecd640e8bfd0c3841
   # Bootstrap commands run inside the cloned directory after clone.
   bootstrap:
-    - "python3 -m venv .venv"
-    - ".venv/bin/pip install -r requirements.txt"
+    - "uv venv --python 3.13 .venv"
+    - "uv pip install --python .venv/bin/python 'mcp>=1.0.0,<2' 'httpx>=0.27.0,<1' 'python-dotenv>=1.0.0,<2'"
 
 # Authentication. Three shapes:
 #   type: api_key  — prompt for env vars, write to ~/.hermes/.env
