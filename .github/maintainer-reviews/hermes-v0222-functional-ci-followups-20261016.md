@@ -47,3 +47,26 @@ assertions, job dependencies and aggregate gates are unchanged.
 The Windows help-probe fixture excludes its verified distlib/venv launcher
 ancestor chain as well as the probe and custodian. It fails if that probe is
 not descended from its own disposable hand-off; no unrelated PID is adopted.
+
+At 5f5b460, all 16 Python slices passed (5,576 files, 60,822 cases,
+860 existing skips, no flaky-file retry report). The root JS bundle-metadata
+check timed out at its unchanged 15-second bound while ten workspace units
+were scheduled four at once on the standard four-core runner; the other nine
+units passed. The same unchanged case passed the earlier 89c9 run. The
+personal fork now uses the existing workspace runner's `--concurrency 2`
+option to bound nested worker contention. All ten discovered units, all test
+assertions, the 15-second case deadline, and the 30-minute job cap stay intact.
+The workspace-runner implementation itself is unchanged. Actual new hosted CI
+is required; this is not a declaration that a retry made the failure disappear.
+
+The same 5f5b460 native Windows x64 run passed all three originally repaired
+groups (real Git trampoline, suspended process setup, marker publication lock).
+Its overall job still failed: three other PowerShell-heavy files hit the
+existing 300-second file cap, and a CIM creation-time query was reported flaky
+after a 60-second first-attempt timeout. The summary's zero failed assertions
+does not discharge those killed-file failures. The personal-fork native
+Windows pool is reduced from four to two workers on both architectures;
+all 216 selected files, the original 300-second file cap, 60-second probe
+timeout and job bounds remain unchanged. Upstream runner scheduling is
+unchanged. No Windows production script or test assertion is altered by this
+resource follow-up; native hosted proof is still required.
