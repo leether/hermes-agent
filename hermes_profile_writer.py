@@ -99,7 +99,8 @@ class WriterPermit:
                 raise WriterFenceError("runtime stamp must not be a symlink")
             self.stamp = self.stamp_path.read_bytes()
             value = json.loads(self.stamp)
-            if value.get("version") != 1 or value.get("runtime_id") != scope.runtime_id or not value.get("generation") or value.get("blocked"):
+            if (value.get("version") != 1 or value.get("runtime_id") != scope.runtime_id or not value.get("generation") or value.get("blocked")
+                    or (value.get("maintenance") and inherited_fd is None)):
                 raise WriterFenceError("profile runtime identity does not match activation")
             self.assert_held()
         except (OSError, ValueError) as exc:
@@ -176,20 +177,43 @@ def maintenance_activity(scope, *, inherited_fd=None):
         permit.release()
 
 
-def block_runtime(permit):
-    """Fail closed after a partial maintenance result; operator reconciliation is required."""
+def _replace_permit_stamp(permit, payload):
     permit.assert_held()
     if not permit.exclusive:
-        raise WriterFenceError("only exclusive maintenance may block a runtime")
-    payload = json.loads(permit.stamp)
-    payload["blocked"] = True
-    temporary = permit.stamp_path.with_name("blocked." + uuid.uuid4().hex + ".tmp")
-    with temporary.open("x", encoding="utf-8") as stream:
+        raise WriterFenceError("only exclusive maintenance may change runtime admission")
+    temporary = permit.stamp_path.with_name("maintenance." + uuid.uuid4().hex + ".tmp")
+    encoded = json.dumps(payload, sort_keys=True).encode()
+    with temporary.open("xb") as stream:
         os.chmod(temporary, 0o600)
-        json.dump(payload, stream, sort_keys=True)
+        stream.write(encoded)
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, permit.stamp_path)
+    permit.stamp = encoded
+
+
+def begin_maintenance(permit):
+    """Persist before any child publication so SIGKILL cannot reopen partial state."""
+    payload = json.loads(permit.stamp)
+    if payload.get("maintenance"):
+        raise WriterFenceError("maintenance reconciliation is already pending")
+    payload["maintenance"] = uuid.uuid4().hex
+    _replace_permit_stamp(permit, payload)
+
+
+def finish_maintenance(permit):
+    payload = json.loads(permit.stamp)
+    if not payload.get("maintenance") or payload.get("blocked"):
+        raise WriterFenceError("maintenance cannot finish without a successful publication")
+    del payload["maintenance"]
+    _replace_permit_stamp(permit, payload)
+
+
+def block_runtime(permit):
+    """Fail closed after a partial result; explicit operator reconciliation is required."""
+    payload = json.loads(permit.stamp)
+    payload["blocked"] = True
+    _replace_permit_stamp(permit, payload)
 
 
 def pin_active_writer():

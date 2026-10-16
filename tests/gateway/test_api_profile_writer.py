@@ -15,7 +15,7 @@ from gateway.platforms.api_server_profile_writer import profile_writer_handler
 from gateway.platforms.api_server_runs import _submit_api_worker, api_worker_live_count
 from hermes_profile_writer import (
     WriterBusyError, WriterFenceError, WriterScope, activate_runtime,
-    submit_writer_worker, writer_activity, maintenance_activity, block_runtime,
+    submit_writer_worker, writer_activity, maintenance_activity, block_runtime, begin_maintenance, finish_maintenance,
 )
 
 pytestmark = pytest.mark.platforms("posix")
@@ -248,6 +248,7 @@ with maintenance_activity(WriterScope(Path(sys.argv[1]), sys.argv[2]), inherited
     print('same-exclusive-authority')
 """
     with maintenance_activity(scope) as permit:
+        begin_maintenance(permit)
         result = subprocess.run([sys.executable, "-c", code, str(scope.home), scope.runtime_id, str(permit.fd)],
                                 pass_fds=(permit.fd,), capture_output=True, text=True, timeout=10, check=True)
         assert result.stdout.strip() == "same-exclusive-authority"
@@ -255,6 +256,7 @@ with maintenance_activity(WriterScope(Path(sys.argv[1]), sys.argv[2]), inherited
             with writer_activity(scope):
                 pass
         permit.assert_held()
+        finish_maintenance(permit)
     with writer_activity(scope):
         pass
 
@@ -268,3 +270,22 @@ def test_partial_maintenance_blocks_profile_until_explicit_reconciliation(scope)
     activate_runtime(scope)
     with writer_activity(scope):
         pass
+
+
+def test_coordinator_sigkill_keeps_partial_profile_fenced(scope):
+    code = """import os,signal,sys
+from pathlib import Path
+from hermes_profile_writer import WriterScope, maintenance_activity, begin_maintenance
+with maintenance_activity(WriterScope(Path(sys.argv[1]), sys.argv[2])) as permit:
+    begin_maintenance(permit)
+    os.kill(os.getpid(), signal.SIGKILL)
+"""
+    child = subprocess.run([sys.executable, "-c", code, str(scope.home), scope.runtime_id],
+                           capture_output=True, text=True, timeout=10, check=False)
+    assert child.returncode == -9
+    with pytest.raises(WriterFenceError):
+        with writer_activity(scope):
+            pass
+    with pytest.raises(WriterFenceError):
+        with maintenance_activity(scope):
+            pass
