@@ -78,3 +78,12 @@ now observes its own parent's real kernel process table through psutil,
 retaining the captured launcher/custodian exclusions and the same 60-second
 bound. The no-instruction-before-publication, dead-child and marker assertions
 are unchanged. No production process code is changed by this oracle fix.
+
+The 39a984415 ARM64 cold-SDK job reached its cleanup hook, where removing the
+test-owned native signer directory failed with EPERM; the per-test and global
+teardown then reported that same directory lock. Both cleanup sites now use
+Node's bounded filesystem retry option (10 retries, 100 ms linear backoff).
+Only the test-owned temporary tree is affected; a persistent lock still throws
+and fails the job. SDK download, signature verification, runtime, warm-cache
+and signing-boundary assertions and all test timeouts are unchanged. No test
+or job result is retried/ignored by this cleanup option.
