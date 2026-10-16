@@ -2,10 +2,11 @@
 from pathlib import Path
 import re
 import shlex
+from urllib.parse import urlsplit
 
 from packaging.requirements import Requirement
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 ROOT = Path(__file__).parents[2]
 MANIFESTS = sorted((ROOT / "optional-mcps").glob("*/manifest.yaml"))
@@ -17,7 +18,12 @@ def test_bundled_git_install_is_immutable_and_project_local(manifest):
     install = data.get("install")
     if not install:
         assert data["transport"]["type"] == "http"
-        assert data["transport"]["url"].startswith("https://")
+        url = data["transport"]["url"]
+        placeholder = re.fullmatch(r"\$\{([A-Z][A-Z0-9_]*)\}", url)
+        required = {item["name"] for item in data.get("auth", {}).get("env", []) if item.get("required")}
+        parsed = urlsplit(url)
+        loopback = parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+        assert url.startswith("https://") or loopback or (placeholder and placeholder.group(1) in required)
         return
     assert re.fullmatch(r"[0-9a-f]{40}", install["ref"])
     commands = [shlex.split(command) for command in install["bootstrap"]]
@@ -30,3 +36,7 @@ def test_bundled_git_install_is_immutable_and_project_local(manifest):
         assert any(item.operator in {"<", "<=", "==", "~="} for item in requirement.specifier)
     assert data["transport"]["command"] == "${INSTALL_DIR}/.venv/bin/python"
     assert data["transport"]["args"] == ["${INSTALL_DIR}/server.py"]
+
+
+def test_catalog_contract_has_real_shipped_manifests():
+    assert MANIFESTS

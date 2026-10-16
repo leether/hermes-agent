@@ -71,7 +71,7 @@ def hook_hashes(head_sha, paths):
     if not paths or len(paths) != len(set(paths)) or not set(paths).issubset(HOOKS):
         raise ValueError("invalid install-hook paths")
     return {
-        path: hashlib.sha256(subprocess.check_output(["git", "show", f"{head_sha}:{path}"])).hexdigest()
+        path: hashlib.sha256(subprocess.check_output(["git", "show", f"{head_sha}:{path}"], timeout=30)).hexdigest()
         for path in paths
     }
 
@@ -91,7 +91,7 @@ def main():
     raw = subprocess.check_output([
         "gh", "api", "--paginate", "--slurp",
         f"repos/{args.repository}/issues/{args.pr}/comments",
-    ], text=True)
+    ], text=True, timeout=60)
     pages = json.loads(raw)
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
         raise ValueError("unexpected comments response")

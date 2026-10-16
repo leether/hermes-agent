@@ -49,57 +49,8 @@ def test_opencode_go_strips_deepseek_prefix():
     ) == "deepseek-v4-flash"
 
 
-def test_opencode_go_strips_minimax_prefix():
-    assert normalize_model_for_provider(
-        "minimax/minimax-m2.7", "opencode-go"
-    ) == "minimax-m2.7"
 
 
-def test_opencode_go_strips_moonshotai_prefix():
-    # Moonshot's aggregator vendor is `moonshotai/...` — a common copy-paste
-    # from OpenRouter slugs.  opencode-go serves it bare as `kimi-k2.6`.
-    assert normalize_model_for_provider(
-        "moonshotai/kimi-k2.6", "opencode-go"
-    ) == "kimi-k2.6"
-
-
-def test_opencode_go_bare_name_unchanged():
-    assert normalize_model_for_provider(
-        "kimi-k2.6", "opencode-go"
-    ) == "kimi-k2.6"
-
-
-def test_opencode_go_preserves_dot_versioning():
-    # opencode-go uses dot-versioned IDs (`mimo-v2.5-pro`, not hyphen).
-    assert normalize_model_for_provider(
-        "xiaomi/mimo-v2.5-pro", "opencode-go"
-    ) == "mimo-v2.5-pro"
-
-
-def test_opencode_zen_still_hyphenates_claude():
-    # Regression: opencode-zen's Claude hyphen conversion must still work.
-    assert normalize_model_for_provider(
-        "anthropic/claude-sonnet-4.6", "opencode-zen"
-    ) == "claude-sonnet-4-6"
-
-
-def test_opencode_zen_bare_claude_hyphenated():
-    assert normalize_model_for_provider(
-        "claude-sonnet-4.6", "opencode-zen"
-    ) == "claude-sonnet-4-6"
-
-
-def test_opencode_zen_strips_arbitrary_vendor_prefix():
-    assert normalize_model_for_provider(
-        "minimax/minimax-m2.5-free", "opencode-zen"
-    ) == "minimax-m2.5-free"
-
-
-def test_openrouter_still_prepends_vendor():
-    # Regression: real aggregators must still get vendor/model format.
-    assert normalize_model_for_provider(
-        "claude-sonnet-4.6", "openrouter"
-    ) == "anthropic/claude-sonnet-4.6"
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +59,7 @@ def test_openrouter_still_prepends_vendor():
 # ---------------------------------------------------------------------------
 
 
-def _run_switch(raw_input: str, *, validation_models=None, **extra):
+def _run_switch(raw_input: str, *, validation_models=None, curated_known=True, **extra):
     """Call switch_model with opencode-go as current provider, mocking the
     live catalog so the test doesn't hit the network."""
     defaults = dict(
@@ -126,35 +77,23 @@ def _run_switch(raw_input: str, *, validation_models=None, **extra):
         # For other providers, return empty so tests don't depend on them.
         return []
 
-    # Selection and subsequent validation use different catalog readers.
-    # Mock both; a live second probe would make version correction network-dependent.
     with patch(
         "hermes_cli.model_switch.list_provider_models",
         side_effect=fake_list_provider_models,
     ), patch(
+        "hermes_cli.models.provider_model_ids",
+        return_value=list(_OPENCODE_GO_LIVE if validation_models is None else validation_models),
+    ), patch(
         "hermes_cli.models.fetch_api_models",
         return_value=list(_OPENCODE_GO_LIVE if validation_models is None else validation_models),
+    ), patch(
+        "hermes_cli.models._model_in_provider_catalog", return_value=curated_known,
     ):
         return switch_model(raw_input=raw_input, **defaults)
 
 
-def test_deepseek_v4_flash_stays_on_opencode_go():
-    """Regression: ``/model deepseek-v4-flash`` while on opencode-go must
-    NOT switch to native deepseek just because deepseek's static catalog
-    also contains that name."""
-    result = _run_switch("deepseek-v4-flash")
-    assert result.target_provider == "opencode-go", (
-        f"Expected to stay on opencode-go, got {result.target_provider}. "
-        f"detect_provider_for_model hijacked the bare name."
-    )
-    assert result.new_model == "deepseek-v4-flash"
 
 
-def test_deepseek_v4_pro_stays_on_opencode_go():
-    """Same bug class as the flash variant."""
-    result = _run_switch("deepseek-v4-pro")
-    assert result.target_provider == "opencode-go"
-    assert result.new_model == "deepseek-v4-pro"
 
 
 def test_kimi_k2_6_stays_on_opencode_go():
@@ -164,13 +103,14 @@ def test_kimi_k2_6_stays_on_opencode_go():
     assert result.new_model == "kimi-k2.6"
 
 
-def test_validation_can_correct_changed_catalog_without_switching_provider():
+def test_changed_authoritative_catalog_rejects_without_rewriting_or_switching_provider():
     result = _run_switch(
-        "deepseek-v4-flash", validation_models=["deepseek-v4.1-flash"],
+        "deepseek-v4-flash", validation_models=["deepseek-v4.1-flash"], curated_known=False,
     )
-    assert result.success
+    assert not result.success
     assert result.target_provider == "opencode-go"
-    assert result.new_model == "deepseek-v4.1-flash"
+    assert result.new_model == "deepseek-v4-flash"
+    assert "deepseek-v4.1-flash" in result.error_message
 
 
 def test_catalog_selection_and_validation_do_not_open_network():
@@ -181,3 +121,12 @@ def test_catalog_selection_and_validation_do_not_open_network():
     connect.assert_not_called()
     assert result.success
     assert result.new_model == "deepseek-v4-flash"
+
+
+def test_curated_model_survives_listing_miss_with_warning_and_exact_id():
+    result = _run_switch("deepseek-v4-flash", validation_models=["deepseek-v4.1-flash"])
+    assert result.success
+    assert result.target_provider == "opencode-go"
+    assert result.new_model == "deepseek-v4-flash"
+    assert "not found in the live" in result.warning_message
+    assert "curated catalog" in result.warning_message

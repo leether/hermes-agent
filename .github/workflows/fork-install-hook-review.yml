@@ -1,0 +1,32 @@
+name: Fork install-hook owner review
+on:
+  pull_request:
+permissions:
+  contents: read
+  issues: read
+jobs:
+  install-hook-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Verify exact content review for root install hooks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          PTH_HITS=$(git diff --diff-filter=AMR --name-only "$BASE" "$HEAD" -- '*.pth')
+          if [ -n "$PTH_HITS" ]; then
+            echo "::error::Interpreter startup .pth changes require a separate security decision."
+            exit 1
+          fi
+          git diff --diff-filter=AMR --name-only "$BASE" "$HEAD" -- setup.py setup.cfg sitecustomize.py usercustomize.py > /tmp/install-hook-paths.txt
+          if [ -s /tmp/install-hook-paths.txt ]; then
+            python3 .github/scripts/verify_install_hook_review.py --repository "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" --head "$HEAD" --hooks-file /tmp/install-hook-paths.txt
+          fi
