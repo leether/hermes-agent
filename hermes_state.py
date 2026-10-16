@@ -34,6 +34,7 @@ from hermes_state_common import (
     stat_db_file_identity as _stat_db_file_identity,
 )
 from hermes_state_holders import read_only_db_uri
+from hermes_profile_writer import profile_db_write
 from hermes_state_pidns import holder_pid_checkable
 from hermes_state_health import (
     STORAGE_CORRUPT, mark_storage_corrupt, note_storage_error, storage_corrupt_reason, storage_state,
@@ -813,12 +814,12 @@ class SessionDB(
     def _connect_and_init(self) -> None:
         # Refuse before sqlite3.connect (under the startup lock) so we cannot mint
         # a replacement WAL while a live writer still holds a deleted sidecar inode.
-        refuse_deleted_wal_generation(self.db_path)
-        # Create/tighten the main database before sqlite3.connect() so a
-        # permissive process umask can never expose a fresh profile store.
-        _secure_state_db_files(self.db_path, create_main=True)
-        self._conn = self._open_writer_conn()
-        self._init_schema()
+        with profile_db_write(self.db_path):
+            refuse_deleted_wal_generation(self.db_path)
+            # Tighten the database before opening it, within maintenance admission.
+            _secure_state_db_files(self.db_path, create_main=True)
+            self._conn = self._open_writer_conn()
+            self._init_schema()
 
     def _connect_and_init_with_lock_patience(self) -> None:
         """Open + init, waiting out a sibling's write lock with jittered patience:
@@ -1024,7 +1025,7 @@ class SessionDB(
             # stable post-close state (identity cleared → adopt / reopen path).
             fn_started = False
             try:
-                with self._lock:
+                with self._lock, profile_db_write(self.db_path):
                     self._raise_if_db_replaced()
                     if self._conn is None:  # close() raced this writer
                         self._reopen_after_close_locked(context="write")

@@ -1707,7 +1707,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     family_token = _api_request_browser_control_transport_family.set(
                         self._browser_control_transport_family(request))
                     try:
-                        return await handler(request)
+                        from gateway.platforms.api_server_profile_writer import profile_writer_handler
+                        return await profile_writer_handler(self, request, handler)
                     finally:
                         _api_request_browser_control_transport_family.reset(family_token)
                         _api_request_browser_control_principal.reset(principal_token)
@@ -4255,7 +4256,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     effective_task_id = session_id or str(uuid.uuid4())
                     # Process baseline for disconnect reaping (this surface bypasses TurnRunner)
                     # + shutdown-interrupt registration, once for every caller.
-                    # Baseline for selective background-process reaping on SSE client disconnect — mirrors
                     # gateway/run.py's gateway-turn cleanup (#76115); this API-server surface runs its own
                     # agent lifecycle and doesn't go through TurnRunner, so it needs its own baseline.
                     # /v1/runs runs its own agent lifecycle (no TurnRunner, no _run_agent) — record turn

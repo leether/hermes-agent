@@ -53,6 +53,34 @@ curl http://localhost:8642/v1/chat/completions \
 
 Or connect Open WebUI, LobeChat, or any other frontend — see the [Open WebUI integration guide](../messaging/open-webui.md) for step-by-step instructions.
 
+## External maintenance admission
+
+An operator-managed maintenance runner can opt one profile into a POSIX shared/exclusive
+writer barrier. Configure the API platform's extra settings under `gateway.platforms`:
+
+```yaml
+gateway:
+  platforms:
+    api_server:
+      profile_writer_guard:
+        enabled: true
+        profile: example-profile
+        runtime_id: reviewed-runtime-id
+```
+
+Before enabling this setting, stop every previous writer, take a consistent backup, and
+explicitly activate the same runtime identity with `hermes_profile_writer.activate_runtime`
+for that profile home. Activation is never automatic. The API holds shared admission through
+actual executor and compression-worker completion, including after a caller disconnects.
+External maintenance must hold `writer_activity(scope, exclusive=True)` while touching state
+and recheck native turn leases, compression locks, session freshness, and binding CAS before
+publication. Expired leases do not prove a worker has exited.
+
+Busy maintenance returns HTTP 503 with `profile_writer_busy`; an activation mismatch returns
+`profile_runtime_mismatch`. Health probes remain available. Other profiles retain their
+existing admission. Writers using older code or direct SQL do not join this barrier and must
+remain stopped during a managed transition. Rollback must preserve post-upgrade writes.
+
 ## Endpoints
 
 ### POST /v1/chat/completions

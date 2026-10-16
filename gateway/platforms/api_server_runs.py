@@ -55,24 +55,55 @@ def _submit_api_worker(loop, fn):
     -> RuntimeError) the worker never runs, so the count is released here instead — a leaked
     count would make the shutdown close gate skip the SessionDB close for the process lifetime.
     """
+    from hermes_profile_writer import pin_active_writer, pinned_writer_context
+
+    permit = pin_active_writer()
     global _API_WORKER_LIVE
     with _API_WORKER_LOCK:
         _API_WORKER_LIVE += 1
 
-    def _counted():
+    def _release():
+        global _API_WORKER_LIVE
         try:
-            return fn()
+            if permit is not None:
+                permit.release()
         finally:
-            global _API_WORKER_LIVE
             with _API_WORKER_LOCK:
                 _API_WORKER_LIVE -= 1
 
+    state_lock = threading.Lock()
+    state = "queued"
+
+    def _counted():
+        nonlocal state
+        with state_lock:
+            if state == "cancelled":
+                return None
+            state = "running"
+        try:
+            with pinned_writer_context(permit):
+                return fn()
+        finally:
+            _release()
+
+    def _cancelled(future):
+        nonlocal state
+        if not future.cancelled():
+            return
+        with state_lock:
+            if state != "queued":
+                return
+            state = "cancelled"
+        # A queued cancellation never reaches the worker's finally block.
+        _release()
+
     try:
-        return loop.run_in_executor(None, _counted)
+        future = loop.run_in_executor(None, _counted)
     except BaseException:
-        with _API_WORKER_LOCK:
-            _API_WORKER_LIVE -= 1
+        _release()
         raise
+    future.add_done_callback(_cancelled)
+    return future
 _ROOM_RETENTION_REQUEST_KEY = (
     RequestKey("hermes.room_run_retention_until", float) if RequestKey is not None
     else "hermes.room_run_retention_until")

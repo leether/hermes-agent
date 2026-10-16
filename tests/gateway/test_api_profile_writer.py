@@ -1,0 +1,240 @@
+"""API cancellation and queued/background work must retain the maintenance barrier."""
+import asyncio
+import concurrent.futures
+import json
+import subprocess
+import sys
+import threading
+from types import SimpleNamespace
+
+import pytest
+
+from tests.waiting import async_wait_until
+
+from gateway.platforms.api_server_profile_writer import profile_writer_handler
+from gateway.platforms.api_server_runs import _submit_api_worker, api_worker_live_count
+from hermes_profile_writer import (
+    WriterBusyError, WriterFenceError, WriterScope, activate_runtime,
+    submit_writer_worker, writer_activity,
+)
+
+pytestmark = pytest.mark.platforms("posix")
+
+
+@pytest.fixture
+def scope(tmp_path):
+    home = tmp_path / "canary"
+    home.mkdir()
+    value = WriterScope(home, "candidate-runtime-1")
+    activate_runtime(value)
+    return value
+
+
+def test_other_process_cannot_enter_maintenance_while_api_writes(scope):
+    code = """import sys
+from pathlib import Path
+from hermes_profile_writer import WriterScope, writer_activity, WriterBusyError
+try:
+    with writer_activity(WriterScope(Path(sys.argv[1]), sys.argv[2]), exclusive=True):
+        print('entered')
+except WriterBusyError:
+    print('blocked')
+"""
+    with writer_activity(scope):
+        child = subprocess.run([sys.executable, "-c", code, str(scope.home), scope.runtime_id],
+                               capture_output=True, text=True, timeout=10, check=False)
+    assert child.returncode == 0 and child.stdout.strip() == "blocked"
+    with writer_activity(scope, exclusive=True):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_cancelled_http_waiter_does_not_release_running_api_worker(scope):
+    started, finish = threading.Event(), threading.Event()
+    baseline = api_worker_live_count()
+
+    def worker():
+        started.set()
+        assert finish.wait(5)
+
+    try:
+        with writer_activity(scope):
+            future = _submit_api_worker(asyncio.get_running_loop(), worker)
+            assert await asyncio.to_thread(started.wait, 2)
+            future.cancel()
+        with pytest.raises(WriterBusyError):
+            with writer_activity(scope, exclusive=True):
+                pytest.fail("maintenance entered a running API worker")
+    finally:
+        finish.set()
+    for _ in range(200):
+        if api_worker_live_count() == baseline:
+            break
+        await asyncio.sleep(0.01)
+    assert api_worker_live_count() == baseline
+    with writer_activity(scope, exclusive=True):
+        pass
+
+
+def test_background_compression_outlives_parent_and_retains_pin(scope):
+    started, finish = threading.Event(), threading.Event()
+
+    def compressor():
+        started.set()
+        assert finish.wait(5)
+        return "committed"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            with writer_activity(scope):
+                future = submit_writer_worker(pool, compressor)
+                assert started.wait(2)
+            with pytest.raises(WriterBusyError):
+                with writer_activity(scope, exclusive=True):
+                    pytest.fail("maintenance entered a detached compression worker")
+        finally:
+            finish.set()
+        assert future.result(timeout=2) == "committed"
+    with writer_activity(scope, exclusive=True):
+        pass
+
+
+def test_cancelled_queued_worker_releases_only_its_own_pin(scope):
+    finish = threading.Event()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        blocker = pool.submit(finish.wait, 5)
+        try:
+            with writer_activity(scope):
+                queued = submit_writer_worker(pool, lambda: pytest.fail("cancelled job ran"))
+                assert queued.cancel()
+                with pytest.raises(WriterBusyError):
+                    with writer_activity(scope, exclusive=True):
+                        pass
+            with writer_activity(scope, exclusive=True):
+                pass
+        finally:
+            finish.set()
+        blocker.result(timeout=2)
+
+
+def test_failed_api_submission_does_not_leak_pin_or_worker_count(scope):
+    class ClosedLoop:
+        def run_in_executor(self, *args):
+            raise RuntimeError("executor shut down")
+
+    before = api_worker_live_count()
+    with writer_activity(scope):
+        with pytest.raises(RuntimeError, match="executor shut down"):
+            _submit_api_worker(ClosedLoop(), lambda: None)
+    assert api_worker_live_count() == before
+    with writer_activity(scope, exclusive=True):
+        pass
+
+
+def test_activation_cannot_replace_live_runtime_and_old_identity_fails(scope):
+    changed = WriterScope(scope.home, "candidate-runtime-2")
+    with writer_activity(scope):
+        with pytest.raises(WriterBusyError):
+            activate_runtime(changed)
+    activate_runtime(changed)
+    with pytest.raises(WriterFenceError):
+        with writer_activity(scope):
+            pass
+    with writer_activity(changed):
+        pass
+
+
+@pytest.mark.parametrize("replacement", ["stamp", "lock"])
+def test_replaced_authority_fences_publication(scope, replacement):
+    with writer_activity(scope) as permit:
+        lock, stamp = scope.paths()
+        if replacement == "stamp":
+            stamp.write_text(json.dumps({"version": 1, "runtime_id": scope.runtime_id, "generation": "other"}))
+        else:
+            lock.unlink()
+            lock.write_text("")
+        with pytest.raises(WriterFenceError):
+            permit.assert_held()
+
+
+@pytest.mark.asyncio
+async def test_api_guard_busy_health_bypass_and_other_profile_isolation(scope, tmp_path, monkeypatch):
+    import hermes_constants
+    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: scope.home)
+    setting = {"enabled": True, "profile": "canary", "runtime_id": scope.runtime_id}
+    adapter = SimpleNamespace(config=SimpleNamespace(extra={"profile_writer_guard": setting}))
+    calls = []
+
+    async def handler(request):
+        calls.append(request.path)
+        return "handled"
+
+    request = SimpleNamespace(match_info={}, path="/v1/chat/completions", method="POST")
+    with writer_activity(scope, exclusive=True):
+        response = await profile_writer_handler(adapter, request, handler)
+        assert response.status == 503 and not calls
+        request.path = "/health"
+        assert await profile_writer_handler(adapter, request, handler) == "handled"
+        other = tmp_path / "unrelated"
+        other.mkdir()
+        monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: other)
+        request.path = "/v1/chat/completions"
+        assert await profile_writer_handler(adapter, request, handler) == "handled"
+        assert not (other / ".runtime-writer").exists()
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_adapter_keeps_existing_handler(scope, monkeypatch):
+    async def handler(request):
+        return "prior-owner"
+
+    adapter = SimpleNamespace(config=SimpleNamespace(extra={}))
+    request = SimpleNamespace(path="/v1/chat/completions", method="POST", match_info={})
+    assert await profile_writer_handler(adapter, request, handler) == "prior-owner"
+
+
+def test_native_late_writer_and_schema_open_obey_profile_barrier(scope):
+    from hermes_state import SessionDB
+
+    db = SessionDB(scope.home / "state.db")
+    try:
+        db.create_session("parent", "api_server")
+        # Independent workers do not inherit the maintenance owner's ContextVar.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            with writer_activity(scope, exclusive=True):
+                late_write = pool.submit(db.append_message, "parent", "user", "late worker")
+                with pytest.raises(WriterBusyError):
+                    late_write.result(timeout=5)
+                late_open = pool.submit(SessionDB, scope.home / "state.db")
+                with pytest.raises(WriterBusyError):
+                    late_open.result(timeout=5)
+        assert db.get_messages_as_conversation("parent") == []
+        db.append_message("parent", "user", "accepted after maintenance")
+        assert db.get_messages_as_conversation("parent")[0]["content"] == "accepted after maintenance"
+    finally:
+        db.close()
+
+
+def test_cancelled_queued_api_worker_releases_pin_without_running(scope):
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        finish = threading.Event()
+        ran = threading.Event()
+        baseline = api_worker_live_count()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            loop.set_default_executor(pool)
+            blocker = loop.run_in_executor(None, finish.wait, 5)
+            try:
+                with writer_activity(scope):
+                    queued = _submit_api_worker(loop, ran.set)
+                    queued.cancel()
+                    await async_wait_until(lambda: api_worker_live_count() == baseline, timeout=2,
+                                           what="queued cancellation releasing worker admission")
+                assert api_worker_live_count() == baseline
+                with writer_activity(scope, exclusive=True):
+                    pass
+                assert not ran.is_set()
+            finally:
+                finish.set()
+                await blocker
+    asyncio.run(scenario())
