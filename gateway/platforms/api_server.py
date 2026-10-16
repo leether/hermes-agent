@@ -160,6 +160,8 @@ from gateway.platforms._shared import coerce_port as _coerce_port
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 from gateway.platforms.tcp_site import start_tcp_site
 from hermes_state_errors import SessionActiveWriteGuardError
+from hermes_profile_writer import pin_writer_future
+from gateway.platforms.api_server_profile_writer import run_profile_thread
 
 
 logger = logging.getLogger(__name__)
@@ -1013,7 +1015,7 @@ class _IdempotencyCache:
                 self._store[key] = {"resp": resp, "fp": fingerprint, "ts": time.time()}
                 self._purge()
                 return resp
-            task = asyncio.create_task(_compute_and_store())
+            task = pin_writer_future(asyncio.create_task(_compute_and_store()))
             self._inflight[inflight_key] = task
 
             def _clear_inflight(done_task: asyncio.Task[Any]) -> None:
@@ -1707,7 +1709,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     family_token = _api_request_browser_control_transport_family.set(
                         self._browser_control_transport_family(request))
                     try:
-                        return await handler(request)
+                        from gateway.platforms.api_server_profile_writer import profile_writer_handler
+                        return await profile_writer_handler(self, request, handler)
                     finally:
                         _api_request_browser_control_transport_family.reset(family_token)
                         _api_request_browser_control_principal.reset(principal_token)
@@ -4040,7 +4043,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
             def _detach_fire(fire_fn, *fire_args) -> web.Response:
                 # The done callback owns the reservation once the task is detached.
-                task = asyncio.create_task(asyncio.to_thread(fire_fn, *fire_args, adapters=adapters, loop=loop))
+                task = asyncio.create_task(run_profile_thread(fire_fn, *fire_args, adapters=adapters, loop=loop))
                 reservation["detached"] = True
                 task.add_done_callback(lambda _task: _release_pending_api_work(self, reservation))
                 self._track_background_task(task, tolerate_missing=True)
@@ -4064,18 +4067,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     # -- Agent execution --------------------------------------------------------------
 
     def _track_background_task(self, task, *, tolerate_missing: bool = False) -> None:
-        """Register a task in ``_background_tasks`` (tolerates test doubles) with auto-discard.
-        ``tolerate_missing`` (cron fire paths) also swallows AttributeError from the whole
-        registration; the run/sweep paths only tolerate an unhashable task."""
-        if tolerate_missing:
-            with suppress(TypeError, AttributeError):
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
-            return
-        with suppress(TypeError):
-            self._background_tasks.add(task)
-        if hasattr(task, "add_done_callback"):
-            task.add_done_callback(self._background_tasks.discard)
+        from gateway.platforms.api_server_profile_writer import track_background_task
+        track_background_task(self, task, tolerate_missing=tolerate_missing)
 
     def _concurrency_limited_response(self) -> Optional[web.Response]:
         """429 when the concurrent-run cap is reached (0 disables), else None. Uses the same
@@ -4255,7 +4248,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     effective_task_id = session_id or str(uuid.uuid4())
                     # Process baseline for disconnect reaping (this surface bypasses TurnRunner)
                     # + shutdown-interrupt registration, once for every caller.
-                    # Baseline for selective background-process reaping on SSE client disconnect — mirrors
                     # gateway/run.py's gateway-turn cleanup (#76115); this API-server surface runs its own
                     # agent lifecycle and doesn't go through TurnRunner, so it needs its own baseline.
                     # /v1/runs runs its own agent lifecycle (no TurnRunner, no _run_agent) — record turn

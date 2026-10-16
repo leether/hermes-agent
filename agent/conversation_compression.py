@@ -1219,10 +1219,10 @@ def run_compress_context_with_progress_timeout(
             return messages, ""
         return worker(worker_fence)
 
-    # Bare pool workers start with an empty ContextVar map; propagate the
-    # parent conversation/approval context into the worker.
+    # Carry request context and retain the profile barrier until the actual worker ends.
+    from hermes_profile_writer import submit_writer_worker
     try:
-        future = executor.submit(propagate_context_to_thread(_fence_gated_worker), fence)
+        future = submit_writer_worker(executor, propagate_context_to_thread(_fence_gated_worker), fence)
     except BaseException:
         _release_compression_admission()
         raise
