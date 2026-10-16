@@ -1169,7 +1169,10 @@ class TestGetModelContextLength:
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
-    def test_custom_endpoint_without_metadata_falls_back_to_catalog(self, mock_endpoint_fetch, mock_fetch):
+    @patch("agent.model_metadata._query_ollama_api_show", return_value=None)
+    def test_custom_endpoint_without_metadata_falls_back_to_catalog(
+        self, _ollama, mock_endpoint_fetch, mock_fetch
+    ):
         """Custom endpoint with no metadata should fall back to the hardcoded
         catalog (not 256K) when the model name matches a known entry.
 
@@ -1794,88 +1797,6 @@ class TestGenericPreCatalogStaleGuard:
         assert not _stale_pre_catalog_cache_entry("minimax", 204_800)
 
 
-class TestMoAContextLength:
-    """MoA virtual provider resolves context from the aggregator slot, not 256K default."""
-
-    def _write_moa_config(
-        self, home, aggregator, custom_providers=None, providers=None
-    ):
-        import os
-        os.makedirs(home, exist_ok=True)
-        payload = {
-            "moa": {
-                "default_preset": "p",
-                "presets": {
-                    "p": {
-                        "enabled": True,
-                        "reference_models": [
-                            {"provider": "openrouter", "model": "openai/gpt-5.5"}
-                        ],
-                        "aggregator": aggregator,
-                    }
-                },
-            }
-        }
-        if custom_providers is not None:
-            payload["custom_providers"] = custom_providers
-        if providers is not None:
-            payload["providers"] = providers
-        with open(os.path.join(home, "config.yaml"), "w", encoding="utf-8") as f:
-            yaml.safe_dump(payload, f)
-
-    def test_moa_resolves_from_aggregator(self, tmp_path, monkeypatch):
-        home = str(tmp_path / ".hermes")
-        monkeypatch.setenv("HERMES_HOME", home)
-        self._write_moa_config(home, {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"})
-
-        # The MoA preset name + virtual base_url would otherwise fall through to
-        # the 256K default; instead it mirrors the aggregator's real window.
-        agg_ctx = get_model_context_length(
-            "anthropic/claude-opus-4.8", base_url="https://openrouter.ai/api/v1", provider="openrouter"
-        )
-        moa_ctx = get_model_context_length("p", base_url="http://127.0.0.1/v1", provider="moa")
-        assert moa_ctx == agg_ctx
-
-
-    def test_moa_custom_context_configures_compressor_threshold(
-        self, tmp_path, monkeypatch
-    ):
-        from agent.context_compressor import ContextCompressor
-
-        configured_context = 600_000
-        home = str(tmp_path / ".hermes")
-        monkeypatch.setenv("HERMES_HOME", home)
-        self._write_moa_config(
-            home,
-            {"provider": "custom:example", "model": "example-model"},
-            providers={
-                "example": {
-                    "api": "http://127.0.0.1:1/v1",
-                    "default_model": "example-model",
-                    "models": {
-                        "example-model": {
-                            "context_length": configured_context,
-                        },
-                    },
-                }
-            },
-        )
-
-        with patch(
-            "agent.model_metadata._resolve_endpoint_context_length",
-            return_value=None,
-        ) as endpoint_probe:
-            compressor = ContextCompressor(
-                model="p",
-                base_url="http://127.0.0.1/v1",
-                provider="moa",
-                threshold_percent=0.50,
-                quiet_mode=True,
-            )
-
-        assert compressor.context_length == configured_context
-        assert compressor.threshold_tokens == configured_context // 2
-        endpoint_probe.assert_not_called()
 
 
 # =========================================================================

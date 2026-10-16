@@ -6,6 +6,8 @@ If any of these fail, an adapter's downloaded-media filenames changed —
 that's a behavioral regression, not a test to update casually.
 """
 
+from pathlib import Path
+
 import pytest
 
 from gateway.platforms.media_cache import (
@@ -54,7 +56,12 @@ class TestCacheMediaBytes:
         )
         path = cache_media_bytes(b"%PDF-1.4", "application/pdf",
                                  filename_hint="report.pdf")
-        assert path.endswith("_report.pdf")
+        cached = Path(path)
+        assert cached.parent == tmp_path
+        assert cached.suffix == ".pdf"
+        assert cached.name.isascii() and len(cached.name.encode()) <= 40
+        assert "report" not in cached.name
+        assert cached.read_bytes() == b"%PDF-1.4"
 
 # ---------------------------------------------------------------------------
 # Per-adapter parity: HISTORICAL mappings hardcoded as the contract

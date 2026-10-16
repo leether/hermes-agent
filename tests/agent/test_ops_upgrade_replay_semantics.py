@@ -28,3 +28,16 @@ def test_mirrored_reasoning_details_are_not_charged_twice():
     duplicate={**base,'reasoning_details':[{'type':'reasoning.text','text':'r'*4000}]}
     assert estimate_messages_tokens_rough([duplicate]) == estimate_messages_tokens_rough([base])
     assert _estimate_msg_budget_tokens(duplicate) == _estimate_msg_budget_tokens(base)
+
+def test_readable_details_follow_newest_turn_replay_policy_without_mutating_history():
+    from agent.model_metadata import estimate_messages_tokens_rough
+
+    base = {"role": "assistant", "content": "visible"}
+    carrier = {**base, "reasoning_details": [
+        {"type": "thinking", "thinking": "r" * 4000, "signature": "signed_fixture"},
+    ]}
+    tail = [{"role": "user", "content": "next"}, {"role": "assistant", "content": "answer"}]
+    assert (estimate_messages_tokens_rough([carrier, *tail], charge_stale_thinking=False)
+            == estimate_messages_tokens_rough([base, *tail], charge_stale_thinking=False))
+    assert estimate_messages_tokens_rough([carrier]) > estimate_messages_tokens_rough([base]) + 900
+    assert len(carrier["reasoning_details"][0]["thinking"]) == 4000

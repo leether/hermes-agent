@@ -58,8 +58,7 @@ class TestGitTrampolineLive:
         from hermes_cli import update_cmd
 
         real = update_cmd._locate_real_git()
-        # windows-latest ships Git for Windows under Program Files with the
-        # canonical git-core layout the locator searches first.
+        # Exercise the real installed Git, including UCRT and bin layouts.
         assert real is not None, "expected git-core git.exe on windows-latest"
         assert real.exists()
         assert real.name == "git.exe"

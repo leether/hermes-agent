@@ -7,6 +7,7 @@ tool results, so a PDF-returning MCP tool appeared to return metadata only.
 
 import base64
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -51,7 +52,29 @@ class TestRenderResourceBlock:
         path = out.split("saved to ", 1)[1].split(" (", 1)[0]
         with open(path, "rb") as fh:
             assert fh.read() == PDF_BYTES
-        assert "report.pdf" in path
+        cached = Path(path)
+        assert cached.parent == doc_cache
+        assert cached.suffix == ".pdf"
+        assert cached.name.isascii() and len(cached.name.encode()) <= 40
+        assert "report" not in cached.name
+        assert 'name="report.pdf"' in out
+
+
+    @pytest.mark.parametrize("uri, expected", [
+        ("file://host/财务报表.pdf", "财务报表.pdf"),
+        ("file://host/%0Areport.pdf", "report.pdf"),
+    ])
+    def test_original_name_survives_without_becoming_cache_path(self, doc_cache, uri, expected):
+        from tools.mcp_tool_content import _render_mcp_resource_block
+
+        out = _render_mcp_resource_block(_embedded(_blob_resource(PDF_BYTES, uri=uri)), "srv")
+        cached = Path(out.split("saved to ", 1)[1].split(" (", 1)[0])
+        assert cached.parent == doc_cache
+        assert cached.read_bytes() == PDF_BYTES
+        assert cached.name.isascii() and len(cached.name.encode()) <= 40
+        assert expected not in cached.name
+        assert f'name={json.dumps(expected, ensure_ascii=False)}' in out
+        assert "\n" not in out
 
 
     def test_malformed_base64_fails_explicitly(self):

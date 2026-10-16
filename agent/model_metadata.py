@@ -2424,8 +2424,9 @@ def estimate_native_anthropic_request_tokens_rough(
 
 
 # Thinking-text keys replayed for at most the newest assistant turn on non-echo routes — must stay
-# in lockstep with ``context_compressor._NEWEST_TURN_ONLY_BUDGET_KEYS``.
-_STALE_THINKING_ESTIMATE_KEYS = ("reasoning", "reasoning_content")
+# in lockstep with the tail budget, which charges readable details separately
+# only when charge_stale_thinking is enabled.
+_STALE_THINKING_ESTIMATE_KEYS = ("reasoning", "reasoning_content", "reasoning_details")
 
 
 def _strip_stale_thinking_for_estimate(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

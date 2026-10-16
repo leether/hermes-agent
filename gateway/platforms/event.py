@@ -121,7 +121,11 @@ class MessageEvent:
         when the payload is prefixed with one or more media refs.
         """
         command_text = _ATTACHMENT_REF_RE.sub("", (self.text or "").lstrip())
-        command_text = command_text.strip().strip("\u200b\u200c\u200d\u200e\u200f\u2060\ufeff").strip()
+        command_text = re.sub(r"^[\s\u200b\u200c\u200d\u200e\u200f\u2060\ufeff]+", "", command_text)
+        edge_marks = "\u200b\u200c\u200d\u200e\u200f\u2060\ufeff"
+        trimmed = command_text.rstrip()
+        if trimmed.endswith(tuple(edge_marks)):
+            command_text = trimmed.rstrip(edge_marks)
         return "/" + command_text[1:] if command_text.startswith("\uff0f") else command_text
 
     def is_command(self) -> bool:

@@ -174,7 +174,11 @@ def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatc
 
     def assign(job, proc):
         children.append(proc)
-        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED
+        from tests.waiting import wait_until
+
+        # CREATE_SUSPENDED can precede the process-table status notification.
+        wait_until(lambda: psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED,
+                   timeout=10, what="new child is suspended before job assignment")
         assert not marker.exists()
         # Query the actual kernel object, not implementation source/constants.
         limits = processes._ExtendedLimits()

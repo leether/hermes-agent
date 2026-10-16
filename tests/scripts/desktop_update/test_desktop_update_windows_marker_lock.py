@@ -11,6 +11,8 @@ import time
 
 import pytest
 
+from tests.waiting import wait_until
+
 from tests.installation_launcher_fixture import publish_fixture_launcher
 from tests.scripts.desktop_update.windows_handoff_support import (
     MARKER,
@@ -98,11 +100,12 @@ def test_a7_concurrent_claimants_over_a_dead_marker_yield_one_owner(tmp_path: Pa
 # -- the update child is the delegate before it runs anything ------------------
 
 FIND_UPDATE_CHILD = r"""
-param([int]$Parent, [int]$Seconds)
+param([int]$Parent, [int]$Seconds, [string]$Excluded)
+$excludedIds = @($Excluded.Split(',') | ForEach-Object { [int]$_ })
 $deadline = (Get-Date).AddSeconds($Seconds)
 while ((Get-Date) -lt $deadline) {
     $row = Get-CimInstance Win32_Process -Filter "ParentProcessId=$Parent" |
-        Where-Object { $_.CommandLine -match '--yes' } | Select-Object -First 1
+        Where-Object { $_.ProcessId -notin $excludedIds } | Select-Object -First 1
     if ($row) { [Console]::Out.Write($row.ProcessId); exit 0 }
     Start-Sleep -Milliseconds 100
 }
@@ -124,19 +127,27 @@ def test_script_killed_before_publishing_the_delegate_runs_no_update(tmp_path: P
     marker = home / MARKER
     finder = tmp_path / 'find_child.ps1'
     finder.write_text(FIND_UPDATE_CHILD, encoding='utf-8')
-    script = _script(home, install=install, HANDOFF_HOLD=str(hold))
+    help_release = tmp_path / 'release-help'
+    help_ready = Path(str(help_release) + '.ready')
+    script = _script(home, install=install, HANDOFF_HOLD=str(hold),
+                     HANDOFF_HELP_BARRIER=str(help_release))
     lock = None
     try:
-        deadline = time.monotonic() + 60
-        while not (marker.exists() and _custodian(home, script.pid)
-                   and marker.read_bytes().split(b'\n')[0] == _custodian(home, script.pid).encode()):
-            assert time.monotonic() < deadline and script.poll() is None, 'script never claimed'
-            time.sleep(0.02)
-        lock = _HeldLock(home)   # after the claim, before the delegate publication
+        # Stop the disposable CLI's help probe before the update can be spawned.
+        # Taking the marker lock from a receipt avoids racing claim vs publication.
+        wait_until(help_ready.exists, timeout=60, what='help probe reached publication barrier')
+        probe_pid = int(help_ready.read_text(encoding='utf-8'))
+        custodian = _custodian(home, script.pid)
+        assert marker.read_bytes().split(b'\n')[0] == custodian.encode()
+        lock = _HeldLock(home)
+        help_release.touch()
         child = subprocess.run([POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(finder),
-                                '-Parent', str(script.pid), '-Seconds', '60'],
+                                '-Parent', str(script.pid), '-Seconds', '60',
+                                '-Excluded', f'{custodian},{probe_pid}'],
                                capture_output=True, text=True, timeout=90, check=False)
         assert child.returncode == 0, 'the update child never appeared'
+        # A CREATE_SUSPENDED child's CommandLine may still be blank in CIM.
+        # Parent identity plus the excluded custodian/probe identifies our sole new child.
         child_pid = int(child.stdout)
         subprocess.run(['taskkill', '/F', '/PID', str(script.pid)], capture_output=True, check=True)
         script.wait(timeout=30)
@@ -147,6 +158,7 @@ def test_script_killed_before_publishing_the_delegate_runs_no_update(tmp_path: P
         assert lines[0] == _custodian(home, script.pid), lines
         assert not any(line.startswith('delegate:') for line in lines), lines
     finally:
+        help_release.touch()
         if lock:
             lock.release()
         hold.touch()

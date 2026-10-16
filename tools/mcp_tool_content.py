@@ -323,10 +323,13 @@ def _render_mcp_resource_block(block, server_name: str = "") -> str:
     if raw_bytes is None:
         return err
     kind = mime or "unknown type"
+    filename = _mcp_resource_filename(uri, mime)
     path, err = _write_block_cache(
-        "cache_document_from_bytes", "embedded resource", "resource", raw_bytes, _mcp_resource_filename(uri, mime),
+        "cache_document_from_bytes", "embedded resource", "resource", raw_bytes, filename,
         unavailable=f"[MCP embedded resource received ({len(raw_bytes)} bytes, {kind}) but document cache unavailable in this process]",
         failed=f"[MCP embedded resource could not be cached: {mime or uri}]")
     if path is None:
         return err
-    return f"[MCP resource saved to {path} ({kind}, {len(raw_bytes)} bytes) — read it with read_file or terminal tools]"
+    display_name = json.dumps(strip_unicode_tags(filename), ensure_ascii=False)
+    return (f"[MCP resource saved to {path} ({kind}, {len(raw_bytes)} bytes, name={display_name})"
+            " — read it with read_file or terminal tools]")
