@@ -17,7 +17,6 @@ from tests.waiting import wait_until
 from tests.installation_launcher_fixture import publish_fixture_launcher
 from tests.scripts.desktop_update.windows_handoff_support import (
     MARKER,
-    POWERSHELL,
     HOLD_CLI,
     _creation_time,
     _alive,
@@ -100,20 +99,6 @@ def test_a7_concurrent_claimants_over_a_dead_marker_yield_one_owner(tmp_path: Pa
 
 # -- the update child is the delegate before it runs anything ------------------
 
-FIND_UPDATE_CHILD = r"""
-param([int]$Parent, [int]$Seconds, [string]$Excluded)
-$excludedIds = @($Excluded.Split(',') | ForEach-Object { [int]$_ })
-$deadline = (Get-Date).AddSeconds($Seconds)
-while ((Get-Date) -lt $deadline) {
-    $row = Get-CimInstance Win32_Process -Filter "ParentProcessId=$Parent" |
-        Where-Object { $_.ProcessId -notin $excludedIds } | Select-Object -First 1
-    if ($row) { [Console]::Out.Write($row.ProcessId); exit 0 }
-    Start-Sleep -Milliseconds 100
-}
-exit 1
-"""
-
-
 @pytest.mark.platforms('windows')
 def test_script_killed_before_publishing_the_delegate_runs_no_update(tmp_path: Path) -> None:
     """Kill cell at the pre-publication boundary: windows.ps1 has created its `hermes update`
@@ -126,8 +111,6 @@ def test_script_killed_before_publishing_the_delegate_runs_no_update(tmp_path: P
     hold = tmp_path / 'release-update'
     ran = Path(str(hold) + '.pid')
     marker = home / MARKER
-    finder = tmp_path / 'find_child.ps1'
-    finder.write_text(FIND_UPDATE_CHILD, encoding='utf-8')
     help_release = tmp_path / 'release-help'
     help_ready = Path(str(help_release) + '.ready')
     script = _script(home, install=install, HANDOFF_HOLD=str(hold),
@@ -150,14 +133,14 @@ def test_script_killed_before_publishing_the_delegate_runs_no_update(tmp_path: P
         assert marker.read_bytes().split(b'\n')[0] == custodian.encode()
         lock = _HeldLock(home)
         help_release.touch()
-        child = subprocess.run([POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(finder),
-                                '-Parent', str(script.pid), '-Seconds', '60',
-                                '-Excluded', ','.join(excluded)],
-                               capture_output=True, text=True, timeout=90, check=False)
-        assert child.returncode == 0, 'the update child never appeared'
-        # A CREATE_SUSPENDED child's CommandLine may still be blank in CIM.
-        # Parent identity plus the excluded custodian/probe identifies our sole new child.
-        child_pid = int(child.stdout)
+        # WMI may not enumerate a never-resumed child yet. psutil reads the
+        # kernel process table, including the suspended child's real parent.
+        parent = psutil.Process(script.pid)
+        child = wait_until(
+            lambda: next((p for p in parent.children() if str(p.pid) not in excluded), None),
+            timeout=60, what='suspended update child appeared under its own hand-off',
+        )
+        child_pid = child.pid
         subprocess.run(['taskkill', '/F', '/PID', str(script.pid)], capture_output=True, check=True)
         script.wait(timeout=30)
         time.sleep(3)

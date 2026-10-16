@@ -70,3 +70,11 @@ all 216 selected files, the original 300-second file cap, 60-second probe
 timeout and job bounds remain unchanged. Upstream runner scheduling is
 unchanged. No Windows production script or test assertion is altered by this
 resource follow-up; native hosted proof is still required.
+
+The native ARM64 result also retained a 300-second killed file and an A7
+first-attempt miss: CIM did not enumerate the never-resumed update child
+within 60 seconds, although the unchanged case passed on retry. The fixture
+now observes its own parent's real kernel process table through psutil,
+retaining the captured launcher/custodian exclusions and the same 60-second
+bound. The no-instruction-before-publication, dead-child and marker assertions
+are unchanged. No production process code is changed by this oracle fix.
