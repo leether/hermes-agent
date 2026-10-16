@@ -15,7 +15,7 @@ from gateway.platforms.api_server_profile_writer import profile_writer_handler
 from gateway.platforms.api_server_runs import _submit_api_worker, api_worker_live_count
 from hermes_profile_writer import (
     WriterBusyError, WriterFenceError, WriterScope, activate_runtime,
-    submit_writer_worker, writer_activity,
+    submit_writer_worker, writer_activity, maintenance_activity, block_runtime,
 )
 
 pytestmark = pytest.mark.platforms("posix")
@@ -238,3 +238,33 @@ def test_cancelled_queued_api_worker_releases_pin_without_running(scope):
                 finish.set()
                 await blocker
     asyncio.run(scenario())
+
+
+def test_maintenance_child_inherits_same_lock_and_api_stays_blocked(scope):
+    code = """import sys
+from pathlib import Path
+from hermes_profile_writer import WriterScope, maintenance_activity
+with maintenance_activity(WriterScope(Path(sys.argv[1]), sys.argv[2]), inherited_fd=int(sys.argv[3])):
+    print('same-exclusive-authority')
+"""
+    with maintenance_activity(scope) as permit:
+        result = subprocess.run([sys.executable, "-c", code, str(scope.home), scope.runtime_id, str(permit.fd)],
+                                pass_fds=(permit.fd,), capture_output=True, text=True, timeout=10, check=True)
+        assert result.stdout.strip() == "same-exclusive-authority"
+        with pytest.raises(WriterBusyError):
+            with writer_activity(scope):
+                pass
+        permit.assert_held()
+    with writer_activity(scope):
+        pass
+
+
+def test_partial_maintenance_blocks_profile_until_explicit_reconciliation(scope):
+    with maintenance_activity(scope) as permit:
+        block_runtime(permit)
+    with pytest.raises(WriterFenceError):
+        with writer_activity(scope):
+            pass
+    activate_runtime(scope)
+    with writer_activity(scope):
+        pass

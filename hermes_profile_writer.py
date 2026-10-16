@@ -47,11 +47,12 @@ class WriterScope:
         return directory / "barrier.lock", directory / "runtime.json"
 
 
-def _open_lock(scope, exclusive):
+def _open_lock(scope, exclusive, inherited_fd=None):
     if fcntl is None:
         raise WriterFenceError("profile writer barrier requires POSIX flock support")
     lock, stamp = scope.paths()
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    fd = (os.dup(inherited_fd) if inherited_fd is not None else
+          os.open(lock, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600))
     try:
         mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         try:
@@ -87,9 +88,10 @@ def activate_runtime(scope):
 
 
 class WriterPermit:
-    def __init__(self, scope, exclusive=False):
+    def __init__(self, scope, exclusive=False, *, inherited_fd=None):
         self.scope = scope
-        self.fd, self.lock_path, self.stamp_path = _open_lock(scope, exclusive)
+        self.exclusive = exclusive
+        self.fd, self.lock_path, self.stamp_path = _open_lock(scope, exclusive, inherited_fd)
         self._mutex = threading.Lock()
         self._refs = 1
         try:
@@ -97,7 +99,7 @@ class WriterPermit:
                 raise WriterFenceError("runtime stamp must not be a symlink")
             self.stamp = self.stamp_path.read_bytes()
             value = json.loads(self.stamp)
-            if value.get("version") != 1 or value.get("runtime_id") != scope.runtime_id or not value.get("generation"):
+            if value.get("version") != 1 or value.get("runtime_id") != scope.runtime_id or not value.get("generation") or value.get("blocked"):
                 raise WriterFenceError("profile runtime identity does not match activation")
             self.assert_held()
         except (OSError, ValueError) as exc:
@@ -156,6 +158,38 @@ def writer_activity(scope, *, exclusive=False):
             yield permit
     finally:
         permit.release()
+
+
+@contextmanager
+def maintenance_activity(scope, *, inherited_fd=None):
+    """Keep one exclusive open-file description across coordinator and prepare child."""
+    current = _ACTIVE.get()
+    if (inherited_fd is None and current is not None and current.exclusive
+            and current.scope == scope):
+        permit = current.pin()
+    else:
+        permit = WriterPermit(scope, True, inherited_fd=inherited_fd)
+    try:
+        with permit.context():
+            yield permit
+    finally:
+        permit.release()
+
+
+def block_runtime(permit):
+    """Fail closed after a partial maintenance result; operator reconciliation is required."""
+    permit.assert_held()
+    if not permit.exclusive:
+        raise WriterFenceError("only exclusive maintenance may block a runtime")
+    payload = json.loads(permit.stamp)
+    payload["blocked"] = True
+    temporary = permit.stamp_path.with_name("blocked." + uuid.uuid4().hex + ".tmp")
+    with temporary.open("x", encoding="utf-8") as stream:
+        os.chmod(temporary, 0o600)
+        json.dump(payload, stream, sort_keys=True)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, permit.stamp_path)
 
 
 def pin_active_writer():
