@@ -68,6 +68,14 @@ def _open_lock(scope, exclusive, inherited_fd=None):
         raise
 
 
+def _sync_stamp_directory(stamp):
+    directory = os.open(stamp.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def activate_runtime(scope):
     """Explicit operator bootstrap, never called by API or nightly admission."""
     fd, _, stamp = _open_lock(scope, True)
@@ -82,6 +90,7 @@ def activate_runtime(scope):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, stamp)
+        _sync_stamp_directory(stamp)
         return payload
     finally:
         os.close(fd)
@@ -189,6 +198,7 @@ def _replace_permit_stamp(permit, payload):
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, permit.stamp_path)
+    _sync_stamp_directory(permit.stamp_path)
     permit.stamp = encoded
 
 
