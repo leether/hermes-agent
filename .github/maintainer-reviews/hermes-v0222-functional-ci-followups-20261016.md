@@ -109,7 +109,7 @@ retains the 300-second cap. This restructuring needs fresh native x64 and
 ARM64 execution, and does not change production updater behavior.
 
 The completed 575 ARM64 run also capped the separate launcher-lineage file
-at 300 seconds after five cases had passed. Its five definitions / ten cases
+at 300 seconds after nine parameterized cases had passed. Its five definitions / ten cases
 are grouped into old-wrapper ownership, start-time environment, shared rule
 parity and run-specific bridge adoption. Helper bodies/constants and every
 case body, decorator, assertion and individual deadline are retained. The
