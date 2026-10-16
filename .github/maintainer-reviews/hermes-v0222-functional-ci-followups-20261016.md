@@ -97,3 +97,13 @@ support module. Every test body, decorator, assertion and individual deadline
 is preserved; the one-time extraction audit verifies that conservation but
 does not replace native execution. Both smaller files still have the original
 300-second cap. No production updater code or timeout is changed.
+
+The 575 x64 run exposed the same aggregate cap in the separate 19-case
+marker contract file: ten cases passed before the unchanged 300-second file
+budget terminated the next case. The original failed job remains evidence.
+The ten definitions / nineteen cases are now grouped by ownership, reader
+parity, desktop lifecycle and delegate liveness, using the original helper
+bodies and constants in a non-collected sibling support module. Every test
+body, decorator, assertion and individual deadline is unchanged; each file
+retains the 300-second cap. This restructuring needs fresh native x64 and
+ARM64 execution, and does not change production updater behavior.
