@@ -30,11 +30,12 @@ jobs:
       - name: Check for unmapped contributor emails
         id: check-emails
         run: |
+          set -euo pipefail
           # Get the merge base between this PR and main
           MERGE_BASE=$(git merge-base origin/main HEAD)
 
           # Find any new author emails in this PR's commits
-          NEW_EMAILS=$(git log ${MERGE_BASE}..HEAD --format='%ae' --no-merges | sort -u)
+          NEW_EMAILS=$(python3 -m scripts.ci.fork_import_contract author-emails --base "$MERGE_BASE")
 
           if [ -z "$NEW_EMAILS" ]; then
             echo "No new commits to check."

@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
-          fetch-depth: 2 # the merge commit and its first parent (the base branch tip)
+          fetch-depth: 0 # exact import provenance; ordinary changes still use HEAD^1
 
       - name: Judge files added or modified against the base branch tip
-        run: python3 scripts/ci/check_blob_size.py --base HEAD^1
+        run: python3 -m scripts.ci.fork_import_contract blob-size --base HEAD^1

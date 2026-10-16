@@ -191,7 +191,7 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
-          fetch-depth: 2 # the merge commit and its first parent (the base branch tip)
+          fetch-depth: 0 # prove the fixed upstream/candidate ancestry before an import
 
       - uses: ./.github/actions/setup-pm
         with:
@@ -204,7 +204,9 @@ jobs:
           command: python -m scripts.ci.python_packages "$(python -m scripts.code_health --print-pins)"
 
       - name: Ratchet the PR against the base branch tip
-        run: python scripts/check --only health --base HEAD^1
+        run: |
+          BASE=$(python -m scripts.ci.fork_import_contract health-base --base HEAD^1)
+          python scripts/check --only health --base "$BASE"
 
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that

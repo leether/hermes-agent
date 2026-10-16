@@ -80,7 +80,7 @@ jobs:
           # Three-point diff (base...head) diffs from the merge base to HEAD,
           # so only changes introduced by this PR are included — not changes
           # that landed on main after the PR branched off.
-          DIFF=$(git diff "$BASE"..."$HEAD" -- . ':!uv.lock' ':!*.lock' ':!package-lock.json' ':!yarn.lock' || true)
+          DIFF=$(python3 -m scripts.ci.fork_import_contract supply-diff --base "$BASE" --head "$HEAD")
 
           FINDINGS=""
 
