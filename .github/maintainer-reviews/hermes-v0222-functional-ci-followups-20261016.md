@@ -36,3 +36,14 @@ invariants together, without weakening any CI gate.
 Windows behavior requires the hosted native x64/ARM64 jobs; macOS local proof
 does not discharge that requirement. The final-head install-hook owner gate
 also remains mandatory. No deployment, production data write, or outbound send.
+
+The first follow-up CI classified the full import successfully but the detect
+job ended cancelled after 66 seconds under its one-minute job cap; all its
+steps reported success and every dependent suite was skipped. That is failed
+CI evidence, not a full test run. Only personal-fork PR #5 against fixed f8aa
+gets a bounded five-minute checkout/classification cap. Native test deadlines,
+assertions, job dependencies and aggregate gates are unchanged.
+
+The Windows help-probe fixture excludes its verified distlib/venv launcher
+ancestor chain as well as the probe and custodian. It fails if that probe is
+not descended from its own disposable hand-off; no unrelated PID is adopted.

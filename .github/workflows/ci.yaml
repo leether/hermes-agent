@@ -71,7 +71,9 @@ jobs:
   detect:
     name: Detect affected areas
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    # Only the fixed full-import PR gets more bounded checkout/classification time.
+    # Native test deadlines and every downstream gate remain unchanged.
+    timeout-minutes: ${{ github.repository == 'leether/hermes-agent' && github.event_name == 'pull_request' && github.event.pull_request.number == 5 && github.event.pull_request.base.sha == 'f8aa37b58570dd2d30b7d2cfe6e09bc5024e212b' && 5 || 1 }}
     outputs:
       python: ${{ steps.gate-lanes.outputs.python }}
       python_prod: ${{ steps.gate-lanes.outputs.python_prod }}

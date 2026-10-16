@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 
+import psutil
 import pytest
 
 from tests.waiting import wait_until
@@ -138,12 +139,20 @@ def test_script_killed_before_publishing_the_delegate_runs_no_update(tmp_path: P
         wait_until(help_ready.exists, timeout=60, what='help probe reached publication barrier')
         probe_pid = int(help_ready.read_text(encoding='utf-8'))
         custodian = _custodian(home, script.pid)
+        excluded = [custodian, str(probe_pid)]
+        # distlib and venv launchers can each add a live parent to the help probe.
+        for parent in psutil.Process(probe_pid).parents():
+            if parent.pid == script.pid:
+                break
+            excluded.append(str(parent.pid))
+        else:
+            pytest.fail('help probe does not belong to the disposable hand-off')
         assert marker.read_bytes().split(b'\n')[0] == custodian.encode()
         lock = _HeldLock(home)
         help_release.touch()
         child = subprocess.run([POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(finder),
                                 '-Parent', str(script.pid), '-Seconds', '60',
-                                '-Excluded', f'{custodian},{probe_pid}'],
+                                '-Excluded', ','.join(excluded)],
                                capture_output=True, text=True, timeout=90, check=False)
         assert child.returncode == 0, 'the update child never appeared'
         # A CREATE_SUSPENDED child's CommandLine may still be blank in CIM.
