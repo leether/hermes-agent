@@ -116,3 +116,16 @@ case body, decorator, assertion and individual deadline are retained. The
 shared sleeper uses pytest's plugin registration to avoid import shadowing.
 All files retain the original cap; the complete new-head native run remains
 required. The failed 575 run is preserved in full.
+
+The 14e x64 native run completed all 223 files / 706 cases with zero failures
+and no flaky report, but reached its unchanged 30-minute job deadline before
+checkout verification/cleanup completed. A successful assertion summary does
+not discharge that cancelled job. Only this exact fork's standard x64 lane
+now uses the runner's existing 1/2 and 2/2 file partition in separate jobs;
+each keeps two workers, a 30-minute job cap, the 300-second file cap and all
+case deadlines. The actual selected file union must be disjoint and complete.
+The official and other repositories keep their single x64 lane; macOS's two
+slices and ARM64's one 60-minute job remain unchanged. A bounded sparse
+checkout preparation job emits the matrix; it changes no security gate or
+production runtime. New-head full CI and exact-head owner review remain
+required.

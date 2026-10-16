@@ -74,31 +74,35 @@ concurrency:
   cancel-in-progress: ${{ github.ref_type != 'tag' && inputs.commit == '' }}
 
 jobs:
+  os-matrix:
+    name: Select native test matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout matrix helper
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          sparse-checkout: scripts/ci/os_test_matrix.py
+          sparse-checkout-cone-mode: false
+      - name: Select native jobs without dropping files
+        id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          OS_MATRIX_JSON="$(python scripts/ci/os_test_matrix.py --repository "$GITHUB_REPOSITORY")"
+          printf 'matrix=%s\n' "$OS_MATRIX_JSON" >> "$GITHUB_OUTPUT"
+
   os-tests:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout || 30 }}
+    needs: os-matrix
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # Two slices on the free standard runner (3 cores, 3 workers): one lane ran
-          # ~7.5 min and became the slowest required job once the Linux suite split.
-          - name: macOS-only tests (1/2)
-            runner: macos-latest
-            marker: macos
-            slice: 1/2
-          - name: macOS-only tests (2/2)
-            runner: macos-latest
-            marker: macos
-            slice: 2/2
-          - name: Windows-only tests
-            runner: ${{ github.repository == 'leether/hermes-agent' && 'windows-latest' || 'windows-latest-32-core' }}
-            marker: windows
-          - name: Windows-only tests (arm64)
-            runner: ${{ github.repository == 'leether/hermes-agent' && 'windows-11-arm' || 'windows-latest-32-arm-core' }}
-            marker: windows
-            timeout: 60
+      matrix: ${{ fromJSON(needs.os-matrix.outputs.matrix) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
