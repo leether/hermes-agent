@@ -157,3 +157,15 @@ job output through `needs`, and evaluates `fromJSON` before replaying every
 selected test consumer. Repository identity is forwarded through nested calls
 and the isolated step environment. All routing and negative-control assertions
 remain required; malformed or missing output is not replaced by a static list.
+
+The 9c4c JS run completed nine workspace checks and 10,873 Desktop UI cases,
+but the root metadata smoke test exceeded its 15-second aggregate budget.
+Along with ten CLI starts, each request validation starts Python. Admissions
+are now independent cases for identity, native stamp platforms, every request
+field, conflicting stamp fields, missing requests, Mac metadata, independent
+witnesses and malformed CLI requests. All original assertion expressions and
+negative values are preserved; every case retains the original 15-second cap.
+The controlled slow-start proof fails the original aggregate case and passes
+the grouped cases. Local broad Mac workspace failures are preserved rather
+than reclassified as Linux CI proof. No retry, production metadata change,
+new deadline or ignored CI check is introduced.
