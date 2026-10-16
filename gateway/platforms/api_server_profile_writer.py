@@ -1,10 +1,15 @@
 """Profile-scoped API admission for external maintenance; inactive unless explicitly configured."""
 import asyncio
+from contextlib import suppress
+from contextvars import copy_context
+from functools import partial
 from pathlib import Path
 
 from aiohttp import web
 
-from hermes_profile_writer import WriterBusyError, WriterFenceError, WriterScope, writer_activity
+from hermes_profile_writer import (
+    WriterBusyError, WriterFenceError, WriterScope, writer_activity, pin_active_writer, pin_writer_future,
+)
 
 
 async def profile_writer_handler(adapter, request, handler):
@@ -32,3 +37,29 @@ async def profile_writer_handler(adapter, request, handler):
         return web.json_response({"error": {"type": "profile_writer_busy", "message": "Profile maintenance in progress"}}, status=503)
     except WriterFenceError:
         return web.json_response({"error": {"type": "profile_runtime_mismatch", "message": "Profile runtime admission failed"}}, status=503)
+
+
+def track_background_task(adapter, task, *, tolerate_missing=False):
+    pin_writer_future(task)
+    if tolerate_missing:
+        with suppress(TypeError, AttributeError):
+            adapter._background_tasks.add(task)
+            task.add_done_callback(adapter._background_tasks.discard)
+        return
+    with suppress(TypeError):
+        adapter._background_tasks.add(task)
+    if hasattr(task, "add_done_callback"):
+        task.add_done_callback(adapter._background_tasks.discard)
+
+
+async def run_profile_thread(function, *args, **kwargs):
+    permit = pin_active_writer()
+    if permit is None:
+        return await asyncio.to_thread(function, *args, **kwargs)
+    from gateway.platforms.api_server_runs import _submit_api_worker
+
+    call = partial(copy_context().run, function, *args, **kwargs)
+    try:
+        return await _submit_api_worker(asyncio.get_running_loop(), call)
+    finally:
+        permit.release()

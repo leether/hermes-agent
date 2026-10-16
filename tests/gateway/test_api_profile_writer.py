@@ -289,3 +289,115 @@ with maintenance_activity(WriterScope(Path(sys.argv[1]), sys.argv[2])) as permit
     with pytest.raises(WriterFenceError):
         with maintenance_activity(scope):
             pass
+
+
+@pytest.mark.asyncio
+async def test_detached_background_task_can_start_worker_after_http_exit(scope):
+    from gateway.platforms.api_server import APIServerAdapter
+    gate = asyncio.Event()
+    adapter = SimpleNamespace(_background_tasks=set())
+    async def detached():
+        await gate.wait()
+        return await _submit_api_worker(asyncio.get_running_loop(), lambda: 'completed')
+    with writer_activity(scope):
+        task = asyncio.create_task(detached())
+        APIServerAdapter._track_background_task(adapter, task)
+    gate.set()
+    assert await task == 'completed'
+    await asyncio.sleep(0)
+    with writer_activity(scope, exclusive=True):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_idempotent_compute_retains_admission_after_caller_cancels(scope):
+    from gateway.platforms.api_server import _IdempotencyCache
+    started, finish = asyncio.Event(), asyncio.Event()
+    async def compute():
+        started.set()
+        await finish.wait()
+        return await _submit_api_worker(asyncio.get_running_loop(), lambda: 'cached')
+    cache = _IdempotencyCache()
+    with writer_activity(scope):
+        waiter = asyncio.create_task(cache.get_or_set('key', 'fingerprint', compute))
+        await started.wait()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+    try:
+        with pytest.raises(WriterBusyError):
+            with writer_activity(scope, exclusive=True):
+                pass
+    finally:
+        finish.set()
+    assert await cache.get_or_set('key', 'fingerprint', compute) == 'cached'
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_real_runs_route_keeps_admission_after_202(scope, monkeypatch):
+    from aiohttp.test_utils import TestClient, TestServer
+    from unittest.mock import MagicMock
+    from gateway.config import PlatformConfig
+    from gateway.platforms.api_server import APIServerAdapter
+    from tests.gateway.test_api_server_runs import _create_runs_app
+    monkeypatch.setenv("HERMES_HOME", str(scope.home))
+    adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"profile_writer_guard": {
+        "enabled": True, "profile": scope.home.name, "runtime_id": scope.runtime_id}}))
+    started, finish = threading.Event(), threading.Event()
+    agent = MagicMock()
+    def run(**kwargs):
+        started.set()
+        assert finish.wait(5)
+        return {"final_response": "done", "messages": []}
+    agent.run_conversation.side_effect = run
+    agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
+    monkeypatch.setattr(adapter, "_create_agent", lambda **kwargs: agent)
+    app = _create_runs_app(adapter)
+    app.middlewares.insert(0, adapter._make_profile_prefix_middleware())
+    try:
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post("/v1/runs", json={"input": "synthetic request"})
+            assert response.status == 202
+            data = await response.json()
+            assert await asyncio.to_thread(started.wait, 2)
+            with pytest.raises(WriterBusyError):
+                with writer_activity(scope, exclusive=True):
+                    pass
+            finish.set()
+            await async_wait_until(lambda: adapter._run_statuses[data["run_id"]]["status"] == "completed", timeout=3)
+    finally:
+        finish.set()
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_cron_thread_keeps_permit_after_task_cancellation(scope):
+    from gateway.platforms.api_server_profile_writer import run_profile_thread
+    from gateway.platforms.api_server import APIServerAdapter
+    from contextvars import ContextVar
+    owner = ContextVar("synthetic_profile_owner", default="wrong")
+    started, finish = threading.Event(), threading.Event()
+    baseline = api_worker_live_count()
+    def fire():
+        assert owner.get() == "canary"
+        started.set()
+        assert finish.wait(5)
+    try:
+        with writer_activity(scope):
+            token = owner.set("canary")
+            try:
+                task = asyncio.create_task(run_profile_thread(fire))
+                APIServerAdapter._track_background_task(SimpleNamespace(_background_tasks=set()), task)
+            finally:
+                owner.reset(token)
+            assert await asyncio.to_thread(started.wait, 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        with pytest.raises(WriterBusyError):
+            with writer_activity(scope, exclusive=True):
+                pass
+    finally:
+        finish.set()
+    await async_wait_until(lambda: api_worker_live_count() == baseline, timeout=3)

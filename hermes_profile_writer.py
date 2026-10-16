@@ -231,6 +231,18 @@ def pin_active_writer():
     return permit.pin() if permit is not None else None
 
 
+def pin_writer_future(future):
+    """Retain copied task context before its first tick and through shielded completion."""
+    permit = pin_active_writer()
+    if permit is not None:
+        try:
+            future.add_done_callback(lambda _: permit.release())
+        except BaseException:
+            permit.release()
+            raise
+    return future
+
+
 @contextmanager
 def pinned_writer_context(permit):
     if permit is None:

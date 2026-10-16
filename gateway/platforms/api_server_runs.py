@@ -26,6 +26,7 @@ except ImportError:
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
 from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
+from hermes_profile_writer import pin_writer_future
 
 
 logger = logging.getLogger("gateway.platforms.api_server")
@@ -780,6 +781,7 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
             _execute_run_via_live_owner(self, launch, *admitted, _api_server=_api_server))
     else:
         task = self._active_run_tasks[run_id] = asyncio.create_task(_execute_run(self, launch, _api_server=_api_server))
+    pin_writer_future(task)
     with suppress(TypeError):
         self._background_tasks.add(task)  # tracked for shutdown drain
     if hasattr(task, "add_done_callback"):
