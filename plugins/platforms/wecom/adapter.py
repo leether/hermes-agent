@@ -513,6 +513,8 @@ class WeComAdapter(WeComStreamMixin, WeComMediaMixin, ChatSendQueueMixin, OwnAcc
         quote = _dict_or_empty(body, "quote")
         quote_type = str(quote.get("msgtype") or "").lower()
         reply_text = _content_of(quote, quote_type) or None if quote_type in ("text", "voice") else None
+        if quote_type == "mixed":
+            reply_text = WeComAdapter._extract_text(quote)[0] or None
         return "\n".join(part for part in text_parts if part).strip(), reply_text
 
     @staticmethod

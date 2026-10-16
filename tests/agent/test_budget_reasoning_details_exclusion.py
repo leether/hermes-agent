@@ -2,16 +2,13 @@
 charge the signed/base64 ``reasoning_details`` envelope at chars/4.
 
 The preflight estimator (``model_metadata._estimate_message_tokens_without_images``)
-excludes ``reasoning_details`` entirely; ``_estimate_msg_budget_tokens`` in the
-compressor mirrors that for the envelope while — per the #51800 counter-argument —
-still counting actual thinking TEXT when it is not already carried by
-``reasoning``/``reasoning_content``.
+excludes the raw ``reasoning_details`` envelope; both budget readers count actual
+readable thinking TEXT when it is not already carried by
+``reasoning``/``reasoning_content``. Opaque signatures stay unpriced.
 """
 
-from agent.context_compressor import (
-    _estimate_msg_budget_tokens,
-    _reasoning_details_text_chars,
-)
+from agent.context_compressor import _estimate_msg_budget_tokens
+from agent.replay_accounting import reasoning_detail_texts
 
 
 def _signed_thinking_block(thinking_chars: int, sig_chars: int) -> dict:
@@ -85,14 +82,14 @@ class TestBudgetExcludesReasoningDetailsEnvelope:
         assert estimate_messages_tokens_rough([loaded]) - estimate_messages_tokens_rough([base]) < 50
 
 
-class TestReasoningDetailsTextChars:
+class TestReasoningDetailsReadableText:
     def test_none_and_empty(self):
-        assert _reasoning_details_text_chars(None) == 0
-        assert _reasoning_details_text_chars([]) == 0
-        assert _reasoning_details_text_chars("") == 0
+        assert reasoning_detail_texts(None) == []
+        assert reasoning_detail_texts([]) == []
+        assert reasoning_detail_texts("") == [""]
 
     def test_string_counts_fully(self):
-        assert _reasoning_details_text_chars("abcd" * 10) == 40
+        assert reasoning_detail_texts("abcd" * 10) == ["abcd" * 10]
 
     def test_envelope_keys_skipped(self):
         blocks = [
@@ -100,7 +97,7 @@ class TestReasoningDetailsTextChars:
             {"type": "redacted_thinking", "data": "D" * 999},
             {"type": "text", "text": "xy"},
         ]
-        assert _reasoning_details_text_chars(blocks) == 5
+        assert reasoning_detail_texts(blocks) == ["abc", "xy"]
 
 
 class TestPreflightExcludesReasoningDetails:
@@ -108,7 +105,7 @@ class TestPreflightExcludesReasoningDetails:
     test): _estimate_message_tokens_without_images must not count the
     reasoning_details envelope."""
 
-    def test_preflight_estimate_ignores_reasoning_details(self):
+    def test_preflight_prices_readable_text_without_signature_bytes(self):
         from agent.model_metadata import _estimate_message_tokens_without_images
 
         base = {"role": "assistant", "content": "hello there"}
@@ -118,8 +115,8 @@ class TestPreflightExcludesReasoningDetails:
         )
         plain = _estimate_message_tokens_without_images(base)
         with_details = _estimate_message_tokens_without_images(loaded)
-        assert with_details - plain < 50, (
-            "preflight estimator counted the reasoning_details payload "
-            f"(delta {with_details - plain} tokens) — compression would fire "
-            "at a fraction of real usage on thinking models (#73298)"
+        text_only = dict(base, reasoning_details=[_signed_thinking_block(10_000, 0)])
+        assert with_details - plain > 2_000, "readable replay text must remain in the preflight budget"
+        assert with_details == _estimate_message_tokens_without_images(text_only), (
+            "opaque signature bytes must not inflate the readable replay estimate"
         )

@@ -4076,7 +4076,7 @@ def _plan_fallback_candidate(
     task_config = _get_auxiliary_task_config(task) if task == "compression" else {}
     fallback_entry = _fallback_chain_entry(task, fb_label) or {}
     common = dict(
-        task=task, effective_timeout=effective_timeout, fallback_entry=fallback_entry,
+        task=task, effective_timeout=_effective_aux_timeout(task, effective_timeout), fallback_entry=fallback_entry,
         task_config=task_config, apply_fast_lane=apply_fast_lane, **request,
     )
 
@@ -6355,23 +6355,18 @@ def _get_task_no_progress_timeout(task: str) -> Optional[float]:
 
 
 def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> float:
-    """``auxiliary.<task>.timeout`` from config, else *default*."""
-    if not task:
-        return default
-    raw = _get_auxiliary_task_config(task).get("timeout")
-    if raw is not None:
-        with contextlib.suppress(ValueError, TypeError):
-            return float(raw)
-    return default
+    """Resolve the profile's auxiliary task timeout, retaining the legacy invalid-value default."""
+    from agent.auxiliary_timeouts import configured_timeout
+    return configured_timeout(_get_auxiliary_task_config(task), default) if task else default
 
 
 def _effective_aux_timeout(task: str, timeout: Optional[float]) -> float:
-    """Explicit ``timeout`` wins, else config; compression gets a floor so a reasoning model
-    summarising a large context isn't cut off."""
-    if timeout is not None:
-        return timeout
-    effective = _get_task_timeout(task)
-    return max(effective, _COMPRESSION_TIMEOUT_FLOOR_SECONDS) if task == "compression" else effective
+    """Keep the compression floor unless the profile declares an explicit request ceiling."""
+    from agent.auxiliary_timeouts import bounded_timeout
+    effective = timeout if timeout is not None else _get_task_timeout(task)
+    if timeout is None and task == "compression":
+        effective = max(effective, _COMPRESSION_TIMEOUT_FLOOR_SECONDS)
+    return bounded_timeout(effective, _get_auxiliary_task_config(task))
 
 
 def _with_custom_endpoint_extra_body(

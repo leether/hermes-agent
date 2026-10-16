@@ -1524,19 +1524,10 @@ def _strip_media_tag_directives(text: str) -> str:
 
 
 def cache_document_from_bytes(data: bytes, filename: str) -> str:
-    """Save raw document bytes to the cache as ``doc_{uuid12}_{original_name}`` and return
-    the absolute path; raises ValueError if the sanitized path escapes the cache directory."""
-    cache_dir = get_document_cache_dir()
-    # Sanitize: strip directory components, null bytes, and control characters
-    safe_name = (Path(filename).name if filename else "document").replace("\x00", "").strip()
-    if not safe_name or safe_name in {".", ".."}:
-        safe_name = "document"
-    filepath = cache_dir / f"doc_{uuid.uuid4().hex[:12]}_{safe_name}"
-    # Final safety check: ensure path stays inside cache dir
-    if not filepath.resolve().is_relative_to(cache_dir.resolve()):
-        raise ValueError(f"Path traversal rejected: {filename!r}")
-    filepath.write_bytes(data)
-    return str(filepath)
+    """Cache raw documents under an opaque, byte-bounded filename; preserve a safe extension."""
+    from gateway.platforms.document_cache import cache_document
+
+    return cache_document(data, filename, get_document_cache_dir())
 
 
 async def cache_document_from_bytes_async(data: bytes, filename: str) -> str:

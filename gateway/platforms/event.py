@@ -120,7 +120,9 @@ class MessageEvent:
         lets is_command / get_command / get_command_args work correctly even
         when the payload is prefixed with one or more media refs.
         """
-        return _ATTACHMENT_REF_RE.sub("", (self.text or "").lstrip()).lstrip()
+        command_text = _ATTACHMENT_REF_RE.sub("", (self.text or "").lstrip())
+        command_text = command_text.strip().strip("\u200b\u200c\u200d\u200e\u200f\u2060\ufeff").strip()
+        return "/" + command_text[1:] if command_text.startswith("\uff0f") else command_text
 
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""

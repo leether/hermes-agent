@@ -1263,7 +1263,7 @@ def _serialized_length_for_budget(value: Any) -> int:
 
 
 # Replay/metadata fields invisible to content/tool_calls accounting but shipped
-# on the wire. ``reasoning_details`` is handled by _reasoning_details_text_chars.
+# on the wire. ``reasoning_details`` uses the shared readable-replay accounting helper.
 _REPLAY_BUDGET_KEYS = "reasoning", "reasoning_content", "codex_reasoning_items", "codex_message_items"
 
 # Keys replayed on EVERY retained assistant turn: Codex items ride every request and message items are needed
@@ -1274,19 +1274,6 @@ _NEWEST_TURN_ONLY_BUDGET_KEYS = "reasoning", "reasoning_content"
 
 # Sidecars whose shadowed compaction checkpoints are dropped from stale turns.
 _STALE_REPLAY_PRUNE_KEYS = "codex_reasoning_items",
-
-
-def _reasoning_details_text_chars(value: Any) -> int:
-    """Thinking-text chars inside a ``reasoning_details`` envelope (never the signed/base64 envelope blobs)."""
-    if isinstance(value, str):
-        return len(value)
-    parts = [value] if isinstance(value, dict) else value if isinstance(value, list) else []
-    return sum(
-        len(part) if isinstance(part, str)
-        else sum(len(t) for t in (part.get(k) for k in ("thinking", "text", "summary")) if isinstance(t, str))
-        if isinstance(part, dict) else 0
-        for part in parts
-    )
 
 
 def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -> int:
@@ -1320,7 +1307,9 @@ def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -
     # byte-identical on Anthropic-wire sessions), skip it here entirely so the prose is not charged twice on
     # top of the envelope exclusion. See #73298.
     if not (msg.get("reasoning") or msg.get("reasoning_content")):
-        tokens += _reasoning_details_text_chars(msg.get("reasoning_details")) // _CHARS_PER_TOKEN
+        from agent.replay_accounting import unmirrored_reasoning_detail_tokens
+
+        tokens += unmirrored_reasoning_detail_tokens(msg)
     return tokens
 
 

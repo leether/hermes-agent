@@ -55,35 +55,47 @@ def _media_body(media_type: str, media_id: str) -> dict[str, Any]:
     return {"msgtype": media_type, media_type: {"media_id": media_id}}
 
 
+def _collect_media_refs(body: dict[str, Any], source: str) -> list[tuple[str, dict[str, Any], str]]:
+    """Keep nested attachment order and provenance without retaining payload values in logs."""
+    refs = []
+    if str(body.get("msgtype") or "").lower() == "mixed":
+        items = _dict_at(body, "mixed").get("msg_item")
+        for index, item in enumerate(items if isinstance(items, list) else []):
+            if isinstance(item, dict):
+                refs.extend(_collect_media_refs(item, f"{source}.mixed[{index}]"))
+        return refs
+    for kind in ("image", "file", "video"):
+        if isinstance(body.get(kind), dict):
+            refs.append((kind, body[kind], f"{source}.{kind}"))
+    if isinstance(body.get("appmsg"), dict):
+        refs.extend(_collect_media_refs(body["appmsg"], f"{source}.appmsg"))
+    return refs
+
+
+def _safe_media_origin(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.hostname or ''}/.../{Path(parsed.path).name}"
+    except ValueError:
+        return "<invalid-url>"
+
+
 class WeComMediaMixin:
     """Media helpers mixed into WeComAdapter (uses its transport, req_id cache and stream registry)."""
 
     async def _extract_media(self, body: dict[str, Any]) -> tuple[list[str], list[str]]:
-        refs: list[tuple[str, dict[str, Any]]] = []
-        msgtype = str(body.get("msgtype") or "").lower()
-
-        def _ref(kind: str, container: dict[str, Any]) -> bool:
-            found = isinstance(container.get(kind), dict)
-            if found:
-                refs.append((kind, container[kind]))
-            return found
-
-        if msgtype == "mixed":
-            mixed = _dict_at(body, "mixed")
-            for item in mixed.get("msg_item") if isinstance(mixed.get("msg_item"), list) else []:
-                if isinstance(item, dict) and str(item.get("msgtype") or "").lower() == "image":
-                    _ref("image", item)
-        else:
-            _ref("image", body)
-            if msgtype == "file":
-                _ref("file", body)
-            if msgtype == "appmsg" and isinstance(body.get("appmsg"), dict):  # AI Bot attachments (PDF/Word/Excel)
-                _ref("file", body["appmsg"]) or _ref("image", body["appmsg"])
+        refs = _collect_media_refs(body, "body")
         quote = _dict_at(body, "quote")
-        quote_type = str(quote.get("msgtype") or "").lower()
-        if quote_type in ("image", "file"):
-            _ref(quote_type, quote)
-        cached = [c for c in [await self._cache_media(kind, ref) for kind, ref in refs] if c]
+        refs.extend(_collect_media_refs(quote, "quote"))
+        cached = [c for c in [await self._cache_media(kind, ref) for kind, ref, _source in refs] if c]
+        if refs:
+            metadata = [{"kind": kind, "source": source, "keys": sorted(map(str, ref)),
+                         "has_url": bool(ref.get("url")), "has_base64": bool(ref.get("base64")),
+                         "has_aeskey": bool(ref.get("aeskey")),
+                         "has_media_id": bool(ref.get("media_id") or ref.get("mediaid"))}
+                        for kind, ref, source in refs]
+            logger.info("[%s] WeCom inbound media metadata: refs=%d cached=%d ref_meta=%s",
+                        self.name, len(refs), len(cached), metadata)
         return [c[0] for c in cached], [c[1] for c in cached]
 
     async def _cache_media(self, kind: str, media: dict[str, Any]) -> Optional[tuple[str, str]]:
@@ -107,14 +119,15 @@ class WeComMediaMixin:
             step = "decrypt"
             raw = self._decrypt_file_bytes(raw, aes_key) if aes_key else raw
         except Exception as exc:
-            logger.debug("[%s] Failed to %s %s from %s: %s", self.name, step, kind, url, exc)
+            logger.warning("[%s] Failed to %s WeCom inbound media: kind=%s origin=%s error_type=%s",
+                           self.name, step, kind, _safe_media_origin(url), type(exc).__name__)
             return None
         content_type = str(headers.get("content-type") or "").split(";", 1)[0].strip() or "application/octet-stream"
         ext = self._guess_extension(url, content_type, fallback=self._detect_image_ext(raw))
         # Images: never forward the CDN's generic octet-stream label — downstream classifiers
         # reject non-image MIMEs; derive it from the resolved extension instead.
         image_mime = content_type if content_type.startswith("image/") else ""
-        return await self._store_media(kind, raw, ext, image_mime, self._guess_filename(url, headers.get("content-disposition"), content_type), content_type, f" from {url}")
+        return await self._store_media(kind, raw, ext, image_mime, self._guess_filename(url, headers.get("content-disposition"), content_type), content_type, f" from {_safe_media_origin(url)}")
 
     async def _store_media(self, kind, raw, ext, image_mime, filename, doc_mime, origin) -> Optional[tuple[str, str]]:
         """Cache bytes as an image (``kind == "image"``) or a document; returns (path, mime)."""
@@ -162,7 +175,15 @@ class WeComMediaMixin:
             raise ValueError("encrypted_data is empty")
         if not aes_key:
             raise ValueError("aes_key is required")
-        key = base64.b64decode(aes_key + '=' * ((4 - len(aes_key) % 4) % 4))  # WeCom doesn't pad base64 keys
+        key_text = str(aes_key).strip()
+        if re.fullmatch(r"[0-9a-fA-F]{64}", key_text):
+            key = bytes.fromhex(key_text)
+        else:
+            padded = key_text + "=" * (-len(key_text) % 4)
+            try:
+                key = base64.b64decode(padded, validate=True)
+            except ValueError:
+                key = base64.urlsafe_b64decode(padded)
         if len(key) != 32:
             raise ValueError(f"Invalid WeCom AES key length: expected 32 bytes, got {len(key)}")
         try:

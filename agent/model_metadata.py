@@ -19,6 +19,7 @@ import hermes_yaml as yaml
 
 from agent import model_metadata_http
 from agent.model_metadata_llamacpp import llamacpp_context
+from agent.replay_accounting import strip_opaque_replay_items
 
 from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, base_url_hostname
 
@@ -2526,18 +2527,6 @@ def _count_image_tokens(msg: dict[str, Any], cost_per_image: int) -> int:
     return count * cost_per_image
 
 
-def strip_opaque_replay_items(items: Any) -> Any:
-    """``codex_reasoning_items`` with ``encrypted_content`` blanked for local token estimation.
-    The ciphertext is priced by the provider's own count, never by its bytes (a compaction
-    checkpoint alone can be 5M chars, #100611); only real usage prices it."""
-    if not isinstance(items, list):
-        return items
-    return [
-        {k: ("" if k == "encrypted_content" else v) for k, v in item.items()} if isinstance(item, dict) else item
-        for item in items
-    ]
-
-
 def _wire_message_shadow(msg: dict[str, Any]) -> dict[str, Any]:
     """Shadow of a message holding only what the provider actually receives.
     * ``api_content`` SUBSTITUTES ``content`` (mirrors ``turn_context.substitute_api_content`` exactly):
@@ -2593,7 +2582,9 @@ def _wire_message_shadow(msg: dict[str, Any]) -> dict[str, Any]:
 
 def _estimate_message_tokens_without_images(msg: dict[str, Any]) -> int:
     """Token estimate for a message shadow with image payloads stripped."""
-    return estimate_tokens_rough(str(_wire_message_shadow(msg) if isinstance(msg, dict) else msg))
+    from agent.replay_accounting import unmirrored_reasoning_detail_tokens
+
+    return estimate_tokens_rough(str(_wire_message_shadow(msg) if isinstance(msg, dict) else msg)) + unmirrored_reasoning_detail_tokens(msg)
 
 
 def estimate_request_tokens_rough(

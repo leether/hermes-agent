@@ -50,8 +50,8 @@ PERSISTENCE_ONLY_MESSAGE_FIELDS = frozenset(
 ) | REPAIR_BOOKKEEPING_FIELDS
 
 
-# Replay carriers the preflight estimate prices at 0, exactly as the compaction tail walk does (opaque signatures,
-# duplicate reasoning copies, ordered sidecars); a mismatch between the two estimates loops compaction.
+# Raw replay envelopes are omitted from both budget walks (opaque signatures and duplicate copies).
+# Readable reasoning_details text is charged separately by replay_accounting, without pricing its envelope.
 UNPRICED_REPLAY_FIELDS = frozenset({"_anthropic_content_blocks", "reasoning_details", "extra_content",
                                     "reasoning_opaque", "reasoning_text", "bedrock_content_blocks"})
 

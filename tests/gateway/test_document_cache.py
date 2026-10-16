@@ -55,9 +55,11 @@ class TestCacheDocumentFromBytes:
         assert os.path.exists(path)
         assert Path(path).read_bytes() == data
 
-    def test_filename_preserved_in_path(self):
+    def test_extension_preserved_in_opaque_path(self):
         path = cache_document_from_bytes(b"data", "report.pdf")
-        assert "report.pdf" in os.path.basename(path)
+        assert Path(path).suffix == ".pdf"
+        assert Path(path).name.isascii()
+        assert "report" not in Path(path).name
 
     def test_empty_filename_uses_fallback(self):
         path = cache_document_from_bytes(b"data", "")
