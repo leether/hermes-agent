@@ -12,7 +12,11 @@ LOCAL_CALL = re.compile(r"^\./\.github/workflows/(?P<name>[^/@]+)$")
 EXISTING_INPUT = {"pm-bundle.yml": "ref", "desktop-bundle-smoke.yml": "sha"}
 
 # Checkouts that deliberately follow the controller (default-branch) tree, with the reason.
-CONTROLLER_CHECKOUTS: dict[tuple[str, str], str] = {}
+CONTROLLER_CHECKOUTS: dict[tuple[str, str], str] = {
+    ("tests-os.yml", "os-matrix[0]"): (
+        "Matrix helper belongs to the workflow revision; older admitted commits may lack it."
+    ),
+}
 
 
 def load(name: str) -> dict:
@@ -77,6 +81,22 @@ def test_every_checkout_follows_the_commit_input():
                     continue
                 ref = (step.get("with") or {}).get("ref", "")
                 assert f"inputs.{key}" in ref, f"{name}:{job_name}[{index}] checks out {ref or 'the default sha'}"
+
+
+def test_controller_matrix_checkout_only_reads_the_workflow_helper():
+    job = load("tests-os.yml")["jobs"]["os-matrix"]
+    steps = job["steps"]
+    checkout = steps[0]["with"]
+    assert not checkout.get("ref")
+    assert checkout["sparse-checkout"].split() == [
+        "scripts/ci/os_test_matrix.py", ".github/actions/check-clean-worktree"]
+    assert checkout["sparse-checkout-cone-mode"] == "false"
+    assert job["timeout-minutes"] == "5"
+    assert job["outputs"]["matrix"] == "${{ steps.matrix.outputs.matrix }}"
+    assert len(steps) == 3
+    assert steps[1]["id"] == "matrix"
+    assert "python scripts/ci/os_test_matrix.py" in steps[1]["run"]
+    assert steps[2]["uses"] == "./.github/actions/check-clean-worktree"
 
 
 def test_stable_release_calls_pass_the_admitted_commit():

@@ -72,6 +72,7 @@ def _run(step: dict, ctx: dict, cwd: Path | None = None, *, receipt: bool = Fals
                                      str(Path(git).parent))),
             "HOME": directory, "RUNNER_TEMP": directory, "GITHUB_OUTPUT": str(output),
             "REPLAY_PYTHON": sys.executable, "REPLAY_CALLS": str(calls),
+            "GITHUB_REPOSITORY": ctx.get("github", {}).get("repository", "NousResearch/hermes-agent"),
             **{k: gha.to_string(gha.render(v, ctx)) for k, v in step.get("env", {}).items()},
         }
         script = root / "step.sh"

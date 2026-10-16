@@ -134,3 +134,26 @@ Matrix preparation checks out the workflow revision's helper rather than
 `inputs.commit`; the original native test jobs still check out that explicit
 test commit. This keeps validation of an older source commit working even
 when it predates the new matrix helper.
+
+The 841 full-suite release-threading check identified that this deliberately
+controller-owned matrix checkout was not registered in its existing narrow
+controller-checkout contract. Only that exact preparation step is registered;
+a companion contract requires the helper plus clean-checkout action sparse
+checkout, five-minute budget and matrix-only output. The preparation job ends
+with the original clean-checkout action, without changing its master mode. Every actual test checkout remains subject to
+the original admitted-commit assertion. The failed run is retained and the
+complete CI-contract directory is verified locally before publication.
+
+A separate 841 Linux fixture failed before its lock-owner assertion: Git 2.55
+removed a background-maintenance lock while the fixture repository was being
+copied. Only the two tiny fixture-setup commits disable automatic maintenance
+and GC through per-command options; no repository configuration is persisted. Production Git configuration, real holder processes,
+lock ownership assertions and all timeouts are unchanged; no lock is ignored
+or deleted to make a copy succeed. The Linux host case still requires CI.
+
+The existing update-routing replay assumed every matrix was a static YAML
+mapping. It now executes the actual safe matrix-output step, forwards its
+job output through `needs`, and evaluates `fromJSON` before replaying every
+selected test consumer. Repository identity is forwarded through nested calls
+and the isolated step environment. All routing and negative-control assertions
+remain required; malformed or missing output is not replaced by a static list.

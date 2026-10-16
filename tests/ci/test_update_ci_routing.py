@@ -122,7 +122,8 @@ def _inputs_for(called: str, given: dict[str, Any]) -> dict[str, Any]:
     return {name: given.get(name, spec.get("default")) for name, spec in declared.items()}
 
 
-def _run_workflow(rel: str, *, inputs: dict[str, Any], detect: dict[str, Any] | None = None) -> dict:
+def _run_workflow(rel: str, *, inputs: dict[str, Any], detect: dict[str, Any] | None = None,
+                  repository: str = "NousResearch/hermes-agent") -> dict:
     """Which jobs of ``rel`` run on a pull request, recursing into called workflows.
 
     Returns ``{job: {"inputs": ..., "jobs": <child result>}}`` for every job that runs.
@@ -149,7 +150,7 @@ def _run_workflow(rel: str, *, inputs: dict[str, Any], detect: dict[str, Any] | 
             all_ran = all(n in ran for n in needs)
             ctx = {
                 "inputs": inputs,
-                "github": {"event_name": "pull_request", "ref_type": "branch"},
+                "github": {"event_name": "pull_request", "ref_type": "branch", "repository": repository},
                 "needs": {n: {"outputs": (ran.get(n) or {}).get("outputs", {}),
                               "result": "success" if n in ran else "skipped"} for n in needs},
                 "__status__": {"always": True, "success": all_ran, "failure": False, "cancelled": False},
@@ -165,12 +166,17 @@ def _run_workflow(rel: str, *, inputs: dict[str, Any], detect: dict[str, Any] | 
                 plan = next(s for s in body["steps"] if s.get("id") == "plan")
                 entry["outputs"] = workflow_steps.outputs(plan, ctx, _REPO)
                 assert json.loads(entry["outputs"]["shards"]), "upgrade plan selected no shards"
+            if name == "os-matrix":
+                plan = next(s for s in body["steps"] if s.get("id") == "matrix")
+                step_outputs = workflow_steps.outputs(plan, ctx, _REPO)
+                entry["outputs"] = {k: gha.render(v, {"steps": {"matrix": {"outputs": step_outputs}}})
+                                    for k, v in body["outputs"].items()}
             uses = body.get("uses")
             if isinstance(uses, str) and uses.startswith("./.github/workflows/"):
                 called = uses[2:]
                 given = {k: gha.render(v, ctx) for k, v in (body.get("with") or {}).items()}
                 entry["inputs"] = _inputs_for(called, given)
-                entry["jobs"] = _run_workflow(called, inputs=entry["inputs"])
+                entry["jobs"] = _run_workflow(called, inputs=entry["inputs"], repository=repository)
             ran[name] = entry
         assert progressed, f"{rel}: unresolvable needs among {pending}"
     return ran
@@ -193,7 +199,7 @@ def _selected_test_files(node: dict, name: str, *, windows_only: bool = False) -
     body, ctx = node["body"], node["ctx"]
     steps = [s for s in body["steps"] if s.get("name", "").startswith(name)]
     assert len(steps) == 1, f"missing/ambiguous required step: {name}"
-    matrix = body.get("strategy", {}).get("matrix", {})
+    matrix = gha.render(body.get("strategy", {}).get("matrix", {}), ctx)
     if "shard" in matrix:
         cells = [{"shard": s} for s in gha.render(matrix["shard"], ctx)]
     else:
