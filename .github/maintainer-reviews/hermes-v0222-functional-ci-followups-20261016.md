@@ -107,3 +107,12 @@ bodies and constants in a non-collected sibling support module. Every test
 body, decorator, assertion and individual deadline is unchanged; each file
 retains the 300-second cap. This restructuring needs fresh native x64 and
 ARM64 execution, and does not change production updater behavior.
+
+The completed 575 ARM64 run also capped the separate launcher-lineage file
+at 300 seconds after five cases had passed. Its five definitions / ten cases
+are grouped into old-wrapper ownership, start-time environment, shared rule
+parity and run-specific bridge adoption. Helper bodies/constants and every
+case body, decorator, assertion and individual deadline are retained. The
+shared sleeper uses pytest's plugin registration to avoid import shadowing.
+All files retain the original cap; the complete new-head native run remains
+required. The failed 575 run is preserved in full.
