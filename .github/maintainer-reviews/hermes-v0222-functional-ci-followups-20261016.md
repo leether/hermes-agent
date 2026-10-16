@@ -87,3 +87,13 @@ Only the test-owned temporary tree is affected; a persistent lock still throws
 and fails the job. SDK download, signature verification, runtime, warm-cache
 and signing-boundary assertions and all test timeouts are unchanged. No test
 or job result is retried/ignored by this cleanup option.
+
+The remaining 39 ARM64 failure was one aggregate file cap: the 12-case
+commit-outcome file completed 11 cases successfully and was killed at the
+unchanged 300-second limit during its final bounded-help test. Its nine test
+definitions (12 parameterized cases) are split into receipt/outcome and
+step-liveness files, sharing the exact launcher fixture in a non-collected
+support module. Every test body, decorator, assertion and individual deadline
+is preserved; the one-time extraction audit verifies that conservation but
+does not replace native execution. Both smaller files still have the original
+300-second cap. No production updater code or timeout is changed.
