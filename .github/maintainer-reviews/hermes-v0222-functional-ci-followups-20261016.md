@@ -129,3 +129,8 @@ slices and ARM64's one 60-minute job remain unchanged. A bounded sparse
 checkout preparation job emits the matrix; it changes no security gate or
 production runtime. New-head full CI and exact-head owner review remain
 required.
+
+Matrix preparation checks out the workflow revision's helper rather than
+`inputs.commit`; the original native test jobs still check out that explicit
+test commit. This keeps validation of an older source commit working even
+when it predates the new matrix helper.
