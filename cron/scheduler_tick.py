@@ -7,6 +7,7 @@ import time
 
 from cron import store_health
 from cron.constants import is_recurring
+from cron.scheduler_profile_writer import guarded_cron
 
 logger = logging.getLogger("cron.scheduler")
 
@@ -30,6 +31,7 @@ def _log_tick_yield_once(reason: str) -> None:
     _last_yield_log = {"reason": reason, "at": now}
 
 
+@guarded_cron(paused_result=0)
 def tick(verbose=True, adapters=None, loop=None, sync=True, *, can_dispatch=None):
     from hermes_cli.backend_retirement import retirement
 

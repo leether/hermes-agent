@@ -3,39 +3,38 @@ import asyncio
 from contextlib import suppress
 from contextvars import copy_context
 from functools import partial
-from pathlib import Path
 
 from aiohttp import web
 
 from hermes_profile_writer import (
-    WriterBusyError, WriterFenceError, WriterScope, writer_activity, pin_active_writer, pin_writer_future,
+    WriterBusyError, WriterFenceError, writer_activity, pin_active_writer, pin_writer_future,
 )
 
 
-async def profile_writer_handler(adapter, request, handler):
-    setting = (adapter.config.extra or {}).get("profile_writer_guard")
-    if not setting:
-        return await handler(request)
-    if not isinstance(setting, dict) or setting.get("enabled") is not True:
-        raise WriterFenceError("profile_writer_guard must be an explicit enabled mapping")
+def _request_writer_scope(adapter):
     from hermes_constants import get_hermes_home
+    from hermes_profile_maintenance import configured_writer_scope, profile_writer_scope
 
-    home = await asyncio.to_thread(Path(get_hermes_home()).resolve, strict=True)
-    target = setting.get("profile")
-    if not isinstance(target, str) or not target or "/" in target or target in {".", ".."}:
-        raise WriterFenceError("profile writer target is invalid")
-    if home.name != target:
-        return await handler(request)
+    configured = profile_writer_scope()
+    adapter_scope = configured_writer_scope(
+        get_hermes_home(), (adapter.config.extra or {}).get("profile_writer_guard"))
+    if configured is not None and adapter_scope is not None and configured != adapter_scope:
+        raise WriterFenceError("request and profile runtime configuration disagree")
+    return configured or adapter_scope
+
+
+async def profile_writer_handler(adapter, request, handler):
     tail = request.match_info.get("tail", request.path).strip("/")
     if request.method == "OPTIONS" or tail in {"health", "health/detailed", "v1/health"}:
         return await handler(request)
     try:
-        scope = WriterScope(home, setting.get("runtime_id") or "")
+        scope = _request_writer_scope(adapter)
         with writer_activity(scope):
             return await handler(request)
     except WriterBusyError:
-        return web.json_response({"error": {"type": "profile_writer_busy", "message": "Profile maintenance in progress"}}, status=503)
-    except WriterFenceError:
+        return web.json_response({"error": {"type": "profile_writer_busy", "message": "Profile maintenance in progress"}},
+                                 status=503, headers={"Retry-After": "60"})
+    except (WriterFenceError, OSError):
         return web.json_response({"error": {"type": "profile_runtime_mismatch", "message": "Profile runtime admission failed"}}, status=503)
 
 
@@ -63,3 +62,26 @@ async def run_profile_thread(function, *args, **kwargs):
         return await _submit_api_worker(asyncio.get_running_loop(), call)
     finally:
         permit.release()
+
+
+def profile_admission_status(adapter):
+    """Read-only startup proof: liveness does not grant business admission."""
+    import json
+    try:
+        scope = _request_writer_scope(adapter)
+        if scope is None:
+            return {"state": "unmanaged"}
+        directory = scope.home / ".runtime-writer"
+        pause, stamp = directory / "pause.json", directory / "runtime.json"
+        if directory.is_symlink() or stamp.is_symlink():
+            return {"state": "invalid"}
+        value = json.loads(stamp.read_bytes())
+        if value.get("runtime_id") != scope.runtime_id or value.get("version") != 1 or not value.get("generation"):
+            return {"state": "invalid"}
+        if value.get("blocked"):
+            return {"state": "blocked"}
+        if pause.exists() or pause.is_symlink() or value.get("maintenance"):
+            return {"state": "paused"}
+        return {"state": "open"}
+    except (WriterFenceError, OSError, ValueError, AttributeError):
+        return {"state": "invalid"}

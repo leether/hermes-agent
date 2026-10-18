@@ -100,7 +100,12 @@ class WriterPermit:
     def __init__(self, scope, exclusive=False, *, inherited_fd=None):
         self.scope = scope
         self.exclusive = exclusive
-        self.fd, self.lock_path, self.stamp_path = _open_lock(scope, exclusive, inherited_fd)
+        from hermes_profile_maintenance import admission_entry
+        from contextlib import nullcontext
+
+        # Exclusive maintenance is allowed while paused; only new business work is denied.
+        with (nullcontext() if exclusive else admission_entry(scope)):
+            self.fd, self.lock_path, self.stamp_path = _open_lock(scope, exclusive, inherited_fd)
         self._mutex = threading.Lock()
         self._refs = 1
         try:

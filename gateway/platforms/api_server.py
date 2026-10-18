@@ -6,6 +6,7 @@ OpenAI-compatible frontend connects at http://localhost:8642/v1 with API_SERVER_
 ``gateway.multiplex_profiles`` secondary profiles live at ``/p/<profile>/...``.
 """
 
+
 import asyncio
 import concurrent.futures
 import errno
@@ -205,7 +206,7 @@ async def _call_verifier(verifier, *args, **kwargs):
     fetches), so they run off the loop."""
     if asyncio.iscoroutinefunction(verifier):
         return await verifier(*args, **kwargs)
-    return await asyncio.to_thread(verifier, *args, **kwargs)
+    return await run_profile_thread(verifier, *args, **kwargs)
 
 
 def _hermes_version() -> str:
@@ -1936,7 +1937,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     cached = self._cached_session_db_locked(key)
                 if cached is not None:
                     return cached
-                return await asyncio.to_thread(self._open_and_cache_session_db, home)
+                return await run_profile_thread(self._open_and_cache_session_db, home)
         except Exception as e:
             logger.debug("SessionDB unavailable for API server: %s", e)
             return None
@@ -2426,53 +2427,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     # -- HTTP handlers ----------------------------------------------------------------
 
     async def _handle_health(self, request: web.Request) -> web.Response:
-        """GET /health — simple health check."""
-        return web.json_response({"status": "ok", "platform": "hermes-agent", "version": _hermes_version()})
+        from gateway.platforms.api_server_health import handle_health
+        return await handle_health(self, request)
 
     @_require_auth
     async def _handle_health_detailed(self, request: web.Request) -> web.Response:
-        """GET /health/detailed — gateway state, platforms, PID for dashboard probing (Bearer auth)."""
-        from gateway.status import (
-            derive_gateway_busy, derive_gateway_drainable, normalize_updated_at, parse_active_agents,
-            read_runtime_status)
-        runtime = read_runtime_status() or {}
-        gw_state = runtime.get("gateway_state")
-        gw_active = parse_active_agents(runtime.get("active_agents", 0))
-# Serve the live adapter's own metrics alongside the persisted platform map: the
-        # heartbeat loop keeps the file fresh, but a just-booted or wedged writer would
-        # otherwise show boot-time values here too (#52323).
-        platforms = runtime.get("platforms", {})
-        if not isinstance(platforms, dict):
-            platforms = {}
-        platforms = dict(platforms)
-        api_status = self._api_server_status_payload(heartbeat_at=time.time())
-        api_platform = dict(platforms.get("api_server", {}))
-        api_platform.setdefault("state", "connected" if self.is_connected else "disconnected")
-        api_platform["metrics"] = api_status
-        platforms["api_server"] = api_platform
-        # Served BY the gateway process, so gateway_running is True by definition; busy/
-        # drainable use the same shared contract as /api/status so the two never disagree.
-        active_api_runs, process_depth, active_delegations = self._readiness_work_counts()
-        from gateway.run import _resolve_gateway_model
-        readiness = collect_runtime_readiness(
-            configured_model=_resolve_gateway_model(), runtime_status=runtime,
-            active_api_runs=active_api_runs, process_completion_queue_depth=process_depth,
-            active_delegations=active_delegations)
-        return web.json_response({
-"status": readiness["status"], "readiness": readiness, "platform": "hermes-agent",
-            "version": _hermes_version(), "gateway_state": gw_state,
-            "platforms": platforms,
-            "api_server": api_status,
-            "metrics_today": api_status["metrics_today"],
-            "last_heartbeat": api_status["last_heartbeat"],
-            "active_agents": gw_active,
-            "gateway_busy": derive_gateway_busy(
-                gateway_running=True, gateway_state=gw_state, active_agents=gw_active),
-            "gateway_drainable": derive_gateway_drainable(
-                gateway_running=True, gateway_state=gw_state),
-            "exit_reason": runtime.get("exit_reason"),
-            # Contract: RFC3339 string | null, never a number (legacy epoch floats exist).
-            "updated_at": normalize_updated_at(runtime.get("updated_at")), "pid": os.getpid()})
+        from gateway.platforms.api_server_health import handle_health_detailed
+        return await handle_health_detailed(self, request)
 
     @_require_auth
     async def _handle_models(self, request: web.Request) -> web.Response:
@@ -2505,7 +2466,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 return build_model_options_payload(
                     load_picker_context(), include_unconfigured=include_unconfigured, refresh=refresh)
             # Enrichment can fetch pricing/provider catalogs: keep it off the event loop.
-            payload = await asyncio.to_thread(_build_payload)
+            payload = await run_profile_thread(_build_payload)
             return web.json_response(payload)
         except Exception:
             logger.exception("[%s] GET /api/model/options failed", self.name)
@@ -2594,7 +2555,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         db = await self._ensure_session_db_async()
         if db is None:
             return _error_response("Session database unavailable.", 503, code="session_db_unavailable")
-        if not await asyncio.to_thread(db.get_session, session_id):
+        if not await run_profile_thread(db.get_session, session_id):
             return _error_response(
                 "Browser control may register only for an existing server session.", 403,
                 err_type="gateway_auth_error", code="browser_control_session_forbidden")
@@ -2669,7 +2630,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
         # attach/disconnect take the controller send_lock, which a worker-thread dispatch may
         # hold while blocking on THIS loop: offload so the race parks a worker, not the loop.
-        await asyncio.to_thread(self._browser_control_broker.attach, scope, _send, owner=ws)
+        await run_profile_thread(self._browser_control_broker.attach, scope, _send, owner=ws)
         try:
             async for msg in ws:
                 if msg.type == web.WSMsgType.TEXT:
@@ -2678,14 +2639,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     except Exception:
                         continue
                     if isinstance(frame, dict):
-                        reply = await asyncio.to_thread(
+                        reply = await run_profile_thread(
                             self._handle_browser_control_frame, scope, frame, owner=ws)
                         if isinstance(reply, dict):
                             await ws.send_json(reply)
                 elif msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.ERROR):
                     break
         finally:
-            await asyncio.to_thread(self._browser_control_broker.disconnect, scope, owner=ws)
+            await run_profile_thread(self._browser_control_broker.disconnect, scope, owner=ws)
         return ws
 
     def _handle_browser_control_frame(
@@ -2814,7 +2775,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             store = self._browser_control_artifacts.get(profile_key)
             if store is not None:
                 return store
-            return await asyncio.to_thread(self._artifact_store_for, profile_key)
+            return await run_profile_thread(self._artifact_store_for, profile_key)
 
     def _artifact_limiter(self) -> ArtifactRateLimiter:
         """Return the per-principal artifact route limiter (lazy)."""
@@ -2887,7 +2848,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # filesystem pressure, and this is a coroutine on the single loop thread.
             # Awaited (not fire-and-forget): the caller needs the receipt, and a swallowed
             # failure would return 201 for bytes that never reached disk.
-            receipt = await asyncio.to_thread(
+            receipt = await run_profile_thread(
                 store.store, data, filename=filename, content_type=content_type, scope=scope)
         except ArtifactTooLarge as exc:
             return _error_response(str(exc), 413, code="artifact_too_large")
@@ -2914,7 +2875,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # load is the same class as the upload write: whole-file read_bytes, SHA-256
             # re-hash, unlink — all blocking, all on the loop thread.
             store = await self._artifact_store_for_async(profile)
-            data, receipt = await asyncio.to_thread(store.load, artifact_id, scope=scope)
+            data, receipt = await run_profile_thread(store.load, artifact_id, scope=scope)
         except ArtifactError as exc:
             message = str(exc)
             if "expired" in message:
@@ -3042,7 +3003,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         db = await self._ensure_session_db_async()
         if db is None:
             return None, self._session_db_unavailable()
-        session = await asyncio.to_thread(db.get_session, session_id)
+        session = await run_profile_thread(db.get_session, session_id)
         if not session:
             return None, _error_response(f"Session not found: {session_id}", 404, code="session_not_found")
         return session, None
@@ -3052,7 +3013,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if db is None:
             return []
         try:
-            return await asyncio.to_thread(db.get_messages_as_conversation, session_id)
+            return await run_profile_thread(db.get_messages_as_conversation, session_id)
         except Exception as exc:
             logger.warning("Failed to load session history for %s: %s", session_id, exc)
             return []
@@ -3084,7 +3045,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         async def _list() -> list:
             # include_pinned back-fills pins past the recency window; search_query pushes the
             # title needle into SQL (substring) so a hidden/old row is found, exact match below.
-            rows = await asyncio.to_thread(
+            rows = await run_profile_thread(
                 db.list_sessions_rich, source=source, limit=limit, offset=offset,
                 include_children=include_children, order_by_last_active=True, include_pinned=True,
                 search_query=title_filter, include_hidden=include_hidden)
@@ -3109,7 +3070,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     stale = db.get_session_by_title(title_filter)
                     return bool(stale and stale.get("archived") and db.unarchive_recoverable_session(stale["id"]))
 
-                if title_filter == BOT_CHAT_TITLE and await asyncio.to_thread(_resurrect):
+                if title_filter == BOT_CHAT_TITLE and await run_profile_thread(_resurrect):
                     sessions = await _list()
             except Exception:
                 pass  # resolution degrades to today's no-row behavior
@@ -3181,7 +3142,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             session_row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
             return (dict(session_row) if session_row else {
                 "id": session_id, "source": source, "model": model_name, "title": title}), None
-        session, err = await asyncio.to_thread(db._execute_write, _atomic)
+        session, err = await run_profile_thread(db._execute_write, _atomic)
         if err == "exists":
             return _error_response(f"Session already exists: {session_id}", 409, code="session_exists")
         if err and err.startswith("title:"):
@@ -3219,7 +3180,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return self._session_db_unavailable()
         if "title" in body:
             try:
-                await asyncio.to_thread(
+                await run_profile_thread(
                     db.set_session_title, session_id, "" if body["title"] is None else str(body["title"]))
             except ValueError as exc:
                 return _error_response(str(exc), 400, code="invalid_title")
@@ -3228,12 +3189,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         for flag, setter in (("archived", db.set_session_archived), ("hidden", db.set_session_hidden),
                              ("pinned", db.set_session_pinned)):
             if flag in body:
-                await asyncio.to_thread(setter, session_id, body[flag])
+                await run_profile_thread(setter, session_id, body[flag])
         if "unread" in body:
-            await asyncio.to_thread(db.set_session_read, session_id, read=not body["unread"])
+            await run_profile_thread(db.set_session_read, session_id, read=not body["unread"])
         if body.get("end_reason"):
-            await asyncio.to_thread(db.end_session, session_id, str(body["end_reason"]))
-        session = await asyncio.to_thread(db.get_session, session_id) or session
+            await run_profile_thread(db.end_session, session_id, str(body["end_reason"]))
+        session = await run_profile_thread(db.get_session, session_id) or session
         return web.json_response({"object": "hermes.session", "session": self._session_response(session)})
 
     @_require_auth
@@ -3255,7 +3216,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         except Exception:
             logger.debug("sessions dir unavailable for delete of %s", session_id, exc_info=True)
         try:
-            deleted = await asyncio.to_thread(
+            deleted = await run_profile_thread(
                 db.delete_session, session_id, sessions_dir=sessions_dir, exclude_active_write_guards=True)
         except SessionActiveWriteGuardError as exc:
             return _error_response(str(exc), 409, code="session_active_turn")
@@ -3266,7 +3227,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             runner = self.gateway_runner or request.app.get("gateway_runner")
             store = getattr(runner, "session_store", None)
             if store is not None:
-                await asyncio.to_thread(store.remove_by_session_id, session_id)
+                await run_profile_thread(store.remove_by_session_id, session_id)
         return web.json_response({"object": "hermes.session.deleted", "id": session_id, "deleted": bool(deleted)})
 
     @_require_auth
@@ -3277,7 +3238,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if err:
             return err
         db = await self._ensure_session_db_async()
-        resolved_id = await asyncio.to_thread(db.resolve_resume_session_id, session_id)
+        resolved_id = await run_profile_thread(db.resolve_resume_session_id, session_id)
         raw_limit, raw_offset = request.query.get("limit"), request.query.get("offset", "0")
         order = request.query.get("order")
         if order not in (None, "oldest", "latest"):
@@ -3294,7 +3255,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         limit = 500 if default_page else min(requested_limit, 500)
         include_compacted = _coerce_request_bool(request.query.get("include_compacted"), default=False)
         # Compression lineage: return root→tip messages, matching the REST router (#51058).
-        messages = await asyncio.to_thread(
+        messages = await run_profile_thread(
             db.get_messages, resolved_id, limit=limit, offset=offset, latest=latest_page,
             include_compacted=include_compacted, include_ancestors=True)
         return web.json_response({
@@ -3319,7 +3280,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         fork_id = str(body.get("id") or body.get("session_id") or f"api_{int(time.time())}_{uuid.uuid4().hex[:8]}").strip()
         if not fork_id or re.search(r'[\r\n\x00]', fork_id):
             return _error_response("Invalid session ID", 400, code="invalid_session_id")
-        if await asyncio.to_thread(db.get_session, fork_id):
+        if await run_profile_thread(db.get_session, fork_id):
             return _error_response(f"Session already exists: {fork_id}", 409, code="session_exists")
 
         # CLI /branch semantics: create the child, then end the original as branched (child first, so
@@ -3327,24 +3288,24 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # ``_branched_from`` is the durable branch marker (same as CLI /branch): with the child created
         # first, the timestamp fallback in _BRANCH_CHILD_SQL (child.started_at >= parent.ended_at) no
         # longer holds, and an unmarked child would vanish from default session listings.
-        await asyncio.to_thread(
+        await run_profile_thread(
             db.create_session, fork_id, "api_server", model=source.get("model"),
             system_prompt=source.get("system_prompt"), parent_session_id=source_id,
             model_config={"_branched_from": source_id})
-        await asyncio.to_thread(db.end_session, source_id, "branched")
-        messages = await asyncio.to_thread(db.get_messages, source_id)
-        await asyncio.to_thread(db.replace_messages, fork_id, messages)
+        await run_profile_thread(db.end_session, source_id, "branched")
+        messages = await run_profile_thread(db.get_messages, source_id)
+        await run_profile_thread(db.replace_messages, fork_id, messages)
         title = body.get("title")
         if title is None:
             base = source.get("title") or "fork"
             title = f"{base} fork"
             with suppress(Exception):
-                title = await asyncio.to_thread(db.get_next_title_in_lineage, base)
+                title = await run_profile_thread(db.get_next_title_in_lineage, base)
         try:
-            await asyncio.to_thread(db.set_session_title, fork_id, str(title))
+            await run_profile_thread(db.set_session_title, fork_id, str(title))
         except ValueError as exc:
             return _error_response(str(exc), 400, code="invalid_title")
-        fork = await asyncio.to_thread(db.get_session, fork_id) or {"id": fork_id, "parent_session_id": source_id}
+        fork = await run_profile_thread(db.get_session, fork_id) or {"id": fork_id, "parent_session_id": source_id}
         return web.json_response({"object": "hermes.session", "session": self._session_response(fork)}, status=201)
 
     async def _prepare_session_chat(self, request: web.Request) -> tuple:
@@ -3377,7 +3338,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         lock_error = self._runtime_lock_error(runtime_request)
         if lock_error is not None:
             return None, lock_error
-        if not await asyncio.to_thread(self._persist_session_runtime_lock, session_id, runtime_request):
+        if not await run_profile_thread(self._persist_session_runtime_lock, session_id, runtime_request):
             return None, _error_response(
                 "Could not persist the requested session model lock", 500, code="model_lock_persistence_failed")
         lock_active = bool(runtime_request.get("require_model_lock"))
@@ -3481,7 +3442,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 return None
             return deliver_to_live_owner(home, owner, message, author=author)
 
-        record = await asyncio.to_thread(_admit)
+        record = await run_profile_thread(_admit)
         return None if record is None else (home, record)
 
     async def _answer_through_live_bot_chat(self, ctx: dict[str, Any]) -> Optional[web.Response]:
@@ -3787,7 +3748,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         lock_error = self._runtime_lock_error(runtime_request)
         if lock_error is not None:
             return lock_error
-        if not await asyncio.to_thread(self._persist_session_runtime_lock, session_id, runtime_request):
+        if not await run_profile_thread(self._persist_session_runtime_lock, session_id, runtime_request):
             return _error_response(
                 "Could not persist the requested session model lock", 500, code="model_lock_persistence_failed")
         requested = runtime_request.get("requested") or {}
@@ -4056,7 +4017,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # Persist the attempt + exact store owner before acknowledging NAS; a failure here
             # is retryable and the reservation remains attached.
             try:
-                claimed_job = await asyncio.to_thread(provider.claim_fire, job_id)
+                claimed_job = await run_profile_thread(provider.claim_fire, job_id)
             except Exception as exc:
                 logger.error("cron fire admission failed for %s: %s", job_id, exc)
                 return web.json_response({"error": "cron fire admission failed", "job_id": job_id}, status=503)
@@ -4587,7 +4548,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 logger.debug("Failed to close response store for %s", self.name, exc_info=True)
         _api_runs._close_run_state(self)
         with suppress(Exception):
-            await asyncio.to_thread(self._memory_sessions.close_all)
+            await run_profile_thread(self._memory_sessions.close_all)
         try:
             if self._site:
                 await self._site.stop()

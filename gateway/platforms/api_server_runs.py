@@ -1,5 +1,7 @@
 """Durable ``/v1/runs`` admission, status, events, and control handlers."""
 
+from gateway.platforms.api_server_profile_writer import run_profile_thread
+
 import asyncio
 import hashlib
 import json
@@ -577,7 +579,7 @@ async def _resolve_live_session_id(self, session_id: str) -> str:
     if not callable(resolver):
         return session_id
     try:
-        resolved = await asyncio.to_thread(resolver, session_id)
+        resolved = await run_profile_thread(resolver, session_id)
         return str(resolved) if resolved else session_id
     except Exception:
         logger.debug("/v1/runs live-session resolve failed for %s", session_id, exc_info=True)
@@ -725,7 +727,7 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
     # An explicit or chained session owns its routing key and is never rebound to the header.
     _declared_selected = not session_id and bool(gateway_session_key)
     selected_session_id = session_id or (
-        await asyncio.to_thread(self._declared_conversation_session, gateway_session_key)
+        await run_profile_thread(self._declared_conversation_session, gateway_session_key)
         if _declared_selected else None)
     # A client-addressed id from before a compression rotation must adopt the live tip (#98619):
     # history loads from it, the turn writes to it, and a detached delivery row persisted to it

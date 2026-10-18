@@ -1,5 +1,7 @@
 """RoomLink dispatch validation and hidden member-session ownership."""
 
+from gateway.platforms.api_server_profile_writer import run_profile_thread
+
 import asyncio
 import hashlib
 import hmac
@@ -45,7 +47,7 @@ async def _ensure_hosted_member_session(self, dispatch: Any) -> str:
             (session_id, clean_title, time.time()))
         return session_id
 
-    return await asyncio.to_thread(db._execute_write, atomic)
+    return await run_profile_thread(db._execute_write, atomic)
 
 
 def _room_dispatch_error(exc: Exception, *, _openai_error) -> web.Response:

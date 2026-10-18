@@ -3,6 +3,9 @@
 A file lock (~/.hermes/cron/.tick.lock) keeps overlapping processes to one tick at a time.
 """
 
+from cron.scheduler_profile_writer import guarded_cron, cron_writer_activity
+from hermes_profile_writer import submit_writer_worker
+
 import atexit
 import concurrent.futures
 import contextlib
@@ -2769,6 +2772,7 @@ def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
         heartbeat_thread.join(timeout=1.0)
 
 
+@guarded_cron()
 def run_one_job(
     job: dict, *, adapters=None, loop=None, verbose: bool = False,
     extra_prompt: Optional[str] = None, cancel_event: Optional[_CancelEventLike] = None,
@@ -3901,8 +3905,10 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
 
     previous_multiplex = is_multiplex_active()
     home_token = secret_token = None
+    writer_context = contextlib.ExitStack()
     try:
         home_token = set_hermes_home_override(profile_home)
+        writer_context.enter_context(cron_writer_activity())
         multiplex_active = bool(payload.get("multiplex_active", False))
         set_multiplex_active(multiplex_active)
         # Plugin secret sources (``ctx.register_secret_source()``) only exist after plugin
@@ -3922,7 +3928,7 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
 
         GatewayStartupMixin._register_config_hooks(
             "Cron external worker: config hook registration failed", level=logging.WARNING)
-        with use_cron_store(profile_home):
+        with cron_writer_activity(), use_cron_store(profile_home):
             if adopt_claimed_execution(execution_id) is None:
                 logger.error(
                     "Cron external worker refused execution %s: durable ownership "
@@ -3970,6 +3976,7 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
                 else:
                     os.environ["_HERMES_CRON_EXTERNAL_WORKER"] = old_external_execution
     finally:
+        writer_context.close()
         if secret_token is not None:
             reset_secret_scope(secret_token)
         set_multiplex_active(previous_multiplex)
@@ -4343,7 +4350,7 @@ def _submit_with_guard(job: dict, pool: concurrent.futures.ThreadPoolExecutor, p
             release_running_job(j["id"], home=home, owner=registration_owner)
 
     try:
-        fut = pool.submit(_run_and_release)
+        fut = submit_writer_worker(pool, _run_and_release)
     except Exception as submit_err:
         release_running_job(job_id, home=_claim_home, owner=registration_owner)
         _clear_run_claim_best_effort()
