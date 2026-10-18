@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from cron.scheduler_profile_writer import guarded_cron
+from cron.scheduler_profile_writer import guarded_cron, owned_cron_profile_homes
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,8 @@ def _existing_profile_homes(profile_homes: list) -> list:
         except Exception:
             logger.warning("cron profile enumeration failed; skipping this cycle", exc_info=True)
             return []
-    return [entry for entry in profile_homes if Path(_profile_entry(entry)[1]).is_dir()]
+    return owned_cron_profile_homes(
+        [entry for entry in profile_homes if Path(_profile_entry(entry)[1]).is_dir()])
 
 
 def routed_profile_fire(home=None) -> bool:

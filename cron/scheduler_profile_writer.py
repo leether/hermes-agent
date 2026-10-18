@@ -74,3 +74,17 @@ def guarded_cron(*, paused_result=_RAISE, retain_claim=False):
                 activity.__exit__(None, None, None)
         return guarded
     return decorate
+
+
+def owned_cron_profile_homes(entries):
+    """An explicitly guarded standalone release owns one profile, never sibling stores."""
+    from pathlib import Path
+    from gateway.config_loader import read_yaml_layers
+    from hermes_constants import get_routing_process_hermes_home, hermes_home_key
+
+    home = Path(get_routing_process_hermes_home()).resolve()
+    config = read_yaml_layers(home)
+    if (config.get("gateway") or {}).get("standalone") is not True or profile_writer_scope(home) is None:
+        return entries
+    return [entry for entry in entries
+            if hermes_home_key(entry[1] if isinstance(entry, tuple) else entry) == hermes_home_key(home)]

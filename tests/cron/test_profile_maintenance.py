@@ -83,3 +83,27 @@ def test_async_tick_keeps_barrier_until_worker_and_finalization_finish(guarded_h
     # The same scheduled occurrence has already been advanced; it cannot fire twice.
     assert scheduler.tick(verbose=False) == 0
     assert len(executions) == 1
+
+
+def test_guarded_standalone_does_not_recover_or_heartbeat_sibling_profile(guarded_home, tmp_path, monkeypatch):
+    import hermes_constants
+    from cron.scheduler_provider import _existing_profile_homes
+    scope, _ = guarded_home
+    monkeypatch.setattr(hermes_constants, "get_routing_process_hermes_home", lambda: scope.home)
+    sibling = tmp_path / "other-profile"
+    sibling.mkdir()
+    path = scope.home / "config.yaml"
+    cfg = json.loads(path.read_text())
+    cfg["gateway"]["standalone"] = True
+    path.write_text(json.dumps(cfg))
+    entries = [("canary", scope.home), ("other-profile", sibling)]
+    assert _existing_profile_homes(entries) == entries[:1]
+    pause_profile(scope)
+    stop = threading.Event()
+    stop.set()
+    InProcessCronScheduler().start(stop, profile_homes=entries)
+    assert not (sibling / "cron").exists()
+    # The existing standalone contract remains intact when no writer guard is configured.
+    del cfg["gateway"]["platforms"]["api_server"]["profile_writer_guard"]
+    path.write_text(json.dumps(cfg))
+    assert _existing_profile_homes(entries) == entries

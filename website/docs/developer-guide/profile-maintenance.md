@@ -16,7 +16,9 @@ gateway:
 
 Configuration belongs to the owning profile. An unmanaged launch adapter cannot bypass
 a routed profile's guard. Unconfigured profiles keep their ordinary behavior. Conflicting
-runtime identities and unreadable configured admission fail closed.
+runtime identities and unreadable configured admission fail closed. A guarded standalone
+release visits only its launch profile for cron, including startup recovery and heartbeat;
+unconfigured standalone and shared host gateways retain normal enumeration.
 
 An operator calls `hermes_profile_maintenance.pause_profile(scope)` and saves its returned
 token in the private maintenance transaction. This persistent pause is independent of

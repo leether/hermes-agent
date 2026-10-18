@@ -108,7 +108,7 @@ def configured_writer_scope(home, setting):
     return WriterScope(home, runtime)
 
 
-def profile_writer_scope():
+def profile_writer_scope(home=None):
     """Cron and API share the profile's configured guard; YAML contains no new secret."""
     from hermes_constants import get_hermes_home
     import hermes_yaml as yaml
@@ -116,7 +116,7 @@ def profile_writer_scope():
     from gateway.config import PlatformConfig
     from gateway.config_loader import load_legacy_gateway_json, merge_platform_sections, read_yaml_layers
 
-    home = Path(get_hermes_home()).resolve()
+    home = Path(home if home is not None else get_hermes_home()).resolve()
     try:
         config = read_yaml_layers(home)
         blocks = merge_platform_sections(config, config.get("gateway"), load_legacy_gateway_json(home))
