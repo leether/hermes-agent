@@ -82,7 +82,10 @@ def resume_profile(scope, token):
             raise WriterFenceError("maintenance resume token does not match")
         # A live, queued or detached worker keeps this exclusive acquisition closed.
         # Runtime mismatch/blocked/partial publication remain independent hard failures.
-        with maintenance_activity(scope):
+        with maintenance_activity(scope) as permit:
+            state = json.loads(permit.stamp)
+            if state.get("blocked") or state.get("maintenance"):
+                raise WriterFenceError("runtime publication still requires reconciliation")
             verify_profile_drained(scope)
             path.unlink()
             _sync_stamp_directory(path)

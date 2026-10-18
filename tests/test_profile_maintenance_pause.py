@@ -69,3 +69,19 @@ def test_resume_never_expires_or_deletes_unresolved_native_lease(tmp_path):
         resume_profile(scope, token)
     with sqlite3.connect(tmp_path / "state.db") as conn:
         assert conn.execute("SELECT holder, expires_at FROM session_turn_leases").fetchall() == [("interrupted", 0)]
+
+
+def test_reused_nightly_exclusive_permit_cannot_resume_partial_publication(tmp_path):
+    from hermes_profile_maintenance import pause_profile, resume_profile
+    from hermes_profile_writer import maintenance_activity, begin_maintenance, finish_maintenance
+    scope = WriterScope(tmp_path, "runtime")
+    activate_runtime(scope)
+    token = pause_profile(scope)
+    with maintenance_activity(scope) as permit:
+        begin_maintenance(permit)
+        with pytest.raises(WriterFenceError, match="publication"):
+            resume_profile(scope, token)
+        assert (tmp_path / ".runtime-writer/pause.json").exists()
+        permit.assert_held()
+        finish_maintenance(permit)
+    resume_profile(scope, token)
