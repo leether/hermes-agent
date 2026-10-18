@@ -6,6 +6,8 @@ api_server-internal helpers are imported lazily inside each method: the origin i
 module (top-level import = cycle), and lazy lookup keeps ``patch("...api_server.X")`` effective.
 """
 
+from gateway.platforms.api_server_profile_writer import run_profile_thread
+
 import asyncio
 import json
 import logging
@@ -709,7 +711,7 @@ class OpenAICompatRoutesMixin:
                     # the delivery writer (gateway/wake.py) and /v1/runs use; fails open.
                     from gateway.platforms.api_server_runs import _resolve_live_session_id
                     session_id = await _resolve_live_session_id(self, provided_session_id)
-                    history = await asyncio.to_thread(db.get_messages_as_conversation, session_id)
+                    history = await run_profile_thread(db.get_messages_as_conversation, session_id)
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
                 history = []
@@ -1123,7 +1125,7 @@ class OpenAICompatRoutesMixin:
         _declared_selected = not stored_session_id and bool(gateway_session_key)
         session_id = (
             stored_session_id
-            or await asyncio.to_thread(self._declared_conversation_session, gateway_session_key)
+            or await run_profile_thread(self._declared_conversation_session, gateway_session_key)
             or str(uuid.uuid4()))
         stream = _coerce_request_bool(body.get("stream"), default=False)
         route, agent_overrides, selection_error = self._select_request_route(

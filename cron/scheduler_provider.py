@@ -14,6 +14,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+from cron.scheduler_profile_writer import guarded_cron, owned_cron_profile_homes
+
 logger = logging.getLogger(__name__)
 
 # Cap for exponential tick backoff during fd exhaustion (interval doubled per failure).
@@ -51,6 +53,7 @@ def _note_tick_failure(exc: BaseException, consecutive_failures: int) -> int:
     return 0
 
 
+@guarded_cron(paused_result=None)
 def _guarded_store_write(action, description, *args, **kwargs):
     """Run a ticker status-marker write so a failing store never ends the ticker thread.
 
@@ -89,7 +92,8 @@ def _existing_profile_homes(profile_homes: list) -> list:
         except Exception:
             logger.warning("cron profile enumeration failed; skipping this cycle", exc_info=True)
             return []
-    return [entry for entry in profile_homes if Path(_profile_entry(entry)[1]).is_dir()]
+    return owned_cron_profile_homes(
+        [entry for entry in profile_homes if Path(_profile_entry(entry)[1]).is_dir()])
 
 
 def routed_profile_fire(home=None) -> bool:
@@ -169,6 +173,7 @@ class CronScheduler(ABC):
         report it as scheduled). Built-in: no-op."""
         return
 
+    @guarded_cron(paused_result=0)
     def recover_interrupted(self) -> int:
         """Run profile-local attempt recovery for every provider lifecycle."""
         from cron.executions import recover_interrupted_executions
@@ -180,6 +185,7 @@ class CronScheduler(ABC):
         """Whether ``fire_due`` accepts ``force`` (signature-detected for older providers)."""
         return provider_supports_force_fire(self)
 
+    @guarded_cron()
     def fire_due(
         self, job_id: str, *, adapters: Any = None, loop: Any = None, force: bool = False,
         manual: bool = False,
@@ -197,6 +203,7 @@ class CronScheduler(ABC):
             return False
         return self.fire_claimed(claimed_job, adapters=adapters, loop=loop)
 
+    @guarded_cron(retain_claim=True)
     def claim_fire(self, job_id: str, *, force: bool = False, manual: bool = False) -> dict | None:
         """Durably claim one fire + create its audit attempt. Transports call this synchronously
         before acknowledging, then pass the exact snapshot to ``fire_claimed`` off-thread."""
@@ -225,6 +232,7 @@ class CronScheduler(ABC):
         claimed_job["execution_id"] = execution["id"]
         return claimed_job
 
+    @guarded_cron()
     def fire_claimed(
         self, claimed_job: dict, *, adapters: Any = None, loop: Any = None,
         cancel_event: Any = None,
@@ -475,7 +483,7 @@ class InProcessCronScheduler(CronScheduler):
                 )
             # Heartbeat before the first sleep so `hermes cron status` sees a live ticker
             # immediately.
-            record_ticker_heartbeat()
+            _guarded_store_write(record_ticker_heartbeat, "startup heartbeat")
         except BaseException as e:
             logger.error("Cron startup recovery error: %s", e, exc_info=True)
             _guarded_store_write(
@@ -579,7 +587,7 @@ class InProcessCronScheduler(CronScheduler):
                             "Marked %d interrupted cron execution(s) for profile at %s",
                             recovered, home,
                         )
-                    record_ticker_heartbeat()
+                    _guarded_store_write(record_ticker_heartbeat, "startup heartbeat")
             except BaseException as e:
                 logger.error(
                     "Cron startup recovery error for profile at %s: %s", home, e, exc_info=True

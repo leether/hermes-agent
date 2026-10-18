@@ -140,7 +140,7 @@ class TestCommandCodeFetchModelsPickerContract:
     """
 
 
-    def test_resolve_provider_full(self):
+    def test_resolve_provider_full(self, monkeypatch):
         """Both profiles must resolve through the model-switch path.
 
         Regression: ``resolve_provider_full`` only knew models.dev + overlay
@@ -148,8 +148,12 @@ class TestCommandCodeFetchModelsPickerContract:
         "Unknown provider" on /model switches even though the picker listed
         them.
         """
+        from hermes_cli import providers as provider_catalog
         from hermes_cli.providers import resolve_provider_full
 
+        # This regression exercises the plugin-only fallback, independent of additions
+        # to the external catalog (which has precedence when an entry exists).
+        monkeypatch.setattr(provider_catalog, "_models_dev_info", lambda *args, **kwargs: None)
         chat = resolve_provider_full("commandcode", {}, [])
         assert chat is not None and chat.id == "commandcode"
         assert chat.transport == "openai_chat"
@@ -158,6 +162,18 @@ class TestCommandCodeFetchModelsPickerContract:
         anth = resolve_provider_full("commandcode-anthropic", {}, [])
         assert anth is not None and anth.id == "commandcode-anthropic"
         assert anth.transport == "anthropic_messages"
+
+    def test_catalog_provider_keeps_its_credential_contract(self, monkeypatch):
+        from types import SimpleNamespace
+        from hermes_cli import providers as provider_catalog
+
+        info = SimpleNamespace(name="Catalog provider", env=["CATALOG_KEY"],
+                               api="https://catalog.example.test/v1", doc="")
+        monkeypatch.setattr(provider_catalog, "_models_dev_info", lambda *args, **kwargs: info)
+        resolved = provider_catalog.resolve_provider_full("commandcode", {}, [])
+        assert resolved.source == "models.dev"
+        assert resolved.api_key_env_vars == ("CATALOG_KEY",)
+        assert resolved.base_url == info.api
 
 
 # ── base_url endpoint override ───────────────────────────────────────────────
