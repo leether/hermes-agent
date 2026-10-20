@@ -289,8 +289,32 @@ Inbound messages are deduplicated using message IDs with a 5-minute window and a
 | `WECOM_ALLOWED_USERS` | — | _(empty)_ | Comma-separated user IDs for the gateway-level allowlist |
 | `WECOM_HOME_CHANNEL` | — | — | Chat ID for cron/notification output |
 | `WECOM_WEBSOCKET_URL` | — | `wss://openws.work.weixin.qq.com` | WebSocket gateway URL |
-| `WECOM_DM_POLICY` | — | `open` | DM access policy |
-| `WECOM_GROUP_POLICY` | — | `open` | Group access policy |
+| `WECOM_DM_POLICY` | — | `pairing` | DM access policy |
+| `WECOM_GROUP_POLICY` | — | `pairing` | Group access policy |
+
+### Migrating a centrally paired bot
+
+An older bot may admit messages in its WeCom adapter while the gateway accepts
+agent work only from users approved through pairing. Do not enable
+`WECOM_ALLOW_ALL_USERS` to migrate that bot: it grants access beyond those users.
+
+For this specific deployment, set the following in the profile's WeCom `extra`
+configuration, retaining its existing pairing files:
+
+```yaml
+dm_policy: pairing
+group_policy: open
+legacy_pairing_admission: true
+```
+
+This explicit startup option requires empty `allow_from`, `group_allow_from`,
+`groups`, and `allowed_users` settings (including their camel-case aliases).
+The gateway still checks live pairing approvals and its
+central authorization rules for every message; revoking an approval denies the
+next turn. It does not approve any user, alter other profiles, or bypass the
+ordinary protection for open DMs. Without this exact opt-in, the existing
+open-policy startup check remains in force. Verify the effective old and new
+authorization decisions before using it for a deployment with other policies.
 
 ## Troubleshooting
 
