@@ -2226,6 +2226,7 @@ _OWN_POLICY_OPEN_ENV = {
 
 def _own_policy_open_startup_violation(config) -> Optional[str]:
     """Return a startup-abort reason when open policy lacks allow-all opt-in."""
+    from gateway.native_pairing_policy import paired_group_startup
     for platform, platform_config in getattr(config, "platforms", {}).items():
         if not getattr(platform_config, "enabled", False):
             continue
@@ -2236,10 +2237,9 @@ def _own_policy_open_startup_violation(config) -> Optional[str]:
         extra = getattr(platform_config, "extra", None) or {}
         dm_policy = str(extra.get("dm_policy")
                         or (_getenv(dm_env, "pairing") if dm_env else "pairing")).strip().lower()
-        group_policy = str(
-            extra.get("group_policy") or (_getenv(group_env, "pairing") if group_env else "pairing")
-        ).strip().lower()
-        if dm_policy != "open" and group_policy != "open":
+        group_policy = str(extra.get("group_policy")
+                           or (_getenv(group_env, "pairing") if group_env else "pairing")).strip().lower()
+        if "open" not in (dm_policy, group_policy) or paired_group_startup(platform, extra, dm_policy, group_policy):
             continue
         gateway_allow_all = _getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
         if gateway_allow_all or (
