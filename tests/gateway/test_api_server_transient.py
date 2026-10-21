@@ -2,7 +2,7 @@
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from aiohttp import web
@@ -42,7 +42,7 @@ def make_real_agent(adapter, monkeypatch):
     monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda cfg, platform: ["web"])
     monkeypatch.setattr("agent.model_metadata.get_model_context_length", lambda *a, **kw: 32768)
     tool = lambda name: {"type": "function", "function": {"name": name, "description": "fixture", "parameters": {"type": "object", "properties": {}}}}
-    monkeypatch.setattr("model_tools.get_tool_definitions", lambda *a, **kw: [tool("web_search"), tool("terminal")])
+    monkeypatch.setattr("model_tools.get_tool_definitions", lambda *a, **kw: [tool("web_search"), tool("web_extract"), tool("terminal")])
     monkeypatch.setattr("model_tools.check_toolset_requirements", dict)
     client = MagicMock()
     client.chat.completions.create.return_value = ChatCompletion(
@@ -58,7 +58,7 @@ def make_real_agent(adapter, monkeypatch):
 def test_real_agent_loop_and_all_transcript_roles_leave_no_durable_content(adapter, tmp_path, monkeypatch, caplog):
     agent = make_real_agent(adapter, monkeypatch)
     assert agent._session_db is None and agent._memory_manager is None
-    assert agent.valid_tool_names == {"web_search"}
+    assert agent.valid_tool_names == {"web_search", "web_extract"}
     assert adapter._ensure_session_db() is None
     with transient_scope(True), caplog.at_level(logging.INFO):
         result = agent.run_conversation(SENTINEL, conversation_history=[])
@@ -164,9 +164,11 @@ async def test_real_chat_route_receipts_and_no_local_media_expansion(adapter, tm
             {"url": url, "content": "synthetic original source " * 12},
             {"url": "https://example.org/failed", "content": SENTINEL * 10, "error": "fetch failed"}]})},
     ]
-    monkeypatch.setattr(adapter, "_run_agent", AsyncMock(return_value=({
-        "final_response": f"Answer {url} MEDIA:{secret}", "messages": messages,
-        "completed": True, "session_id": "fresh"}, {})))
+    async def run(**kwargs):
+        kwargs["tool_complete_callback"]("read", "web_extract", {}, messages[-1]["content"])
+        return {"final_response": f"Answer {url} MEDIA:{secret}", "messages": messages,
+                "completed": True, "session_id": "fresh"}, {}
+    monkeypatch.setattr(adapter, "_run_agent", run)
     app = web.Application(middlewares=[middleware(adapter)])
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
     async with TestClient(TestServer(app)) as client:
@@ -190,18 +192,23 @@ def test_real_tool_round_cannot_expand_allowlist_or_spill_result(adapter, tmp_pa
             "index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": None,
             "tool_calls": [{"id": name, "type": "function", "function": {
                 "name": name, "arguments": json.dumps({"query": "generic dietary evidence"})}}
-                for name in ("web_search", "terminal")]}}]), final]
+                for name in ("web_extract", "terminal")]}}]), final]
     # Simulate a later toolset refresh: turn validation must restore the boundary.
     agent.valid_tool_names.add("terminal")
     executed = []
     def tool(name, *args, **kwargs):
         executed.append(name)
-        return json.dumps({"data": {"content": SENTINEL * 2000}})
+        return json.dumps({"results": [{"url": "https://www.who.int/fixture", "content": SENTINEL * 2000}]})
     monkeypatch.setattr("model_tools.handle_function_call", tool)
+    from gateway.platforms.api_server_transient import fetched_urls
+    read_urls = []
+    agent.tool_complete_callback = lambda call_id, name, args, raw: read_urls.extend(fetched_urls(raw))
     with transient_scope(True):
         result = agent.run_conversation("read only synthetic evidence", conversation_history=[])
         agent.close()
-    assert executed == ["web_search"] and result["completed"]
+    assert executed == ["web_extract"] and result["completed"]
+    assert read_urls == ["https://www.who.int/fixture"]
+    assert any("<untrusted_tool_result" in str(m.get("content")) for m in result["messages"] if m.get("role") == "tool")
     assert "terminal" not in agent.valid_tool_names
     assert SENTINEL not in capsys.readouterr().out
     for file in tmp_path.rglob("*"):

@@ -18,7 +18,7 @@ debug dumps, native memory, oversized-tool spill files and web extraction caches
 are disabled in the request context. Logging omits content before queueing; stdout
 status is suppressed. Local `MEDIA:` paths are not read into API responses.
 Responses omit reasoning and include `hermes_read_urls` from successful
-`web_extract` results still present in the current turn. These are retrieval
+`web_extract` completion callbacks in the current request, before presentation wrapping or compaction. These are retrieval
 receipts, not a guarantee that a cited source supports a claim.
 
 The host still owns upstream payload/log retention, provider data handling,

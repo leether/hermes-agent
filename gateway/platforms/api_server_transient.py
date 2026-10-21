@@ -7,6 +7,7 @@ not an alternative long-term store. Ordinary API adapters retain their behavior.
 import logging
 import json
 import re
+import threading
 
 from aiohttp import web
 from agent.transient_session import transient_scope
@@ -85,35 +86,41 @@ def render_final_text(adapter, text, native_resolver):
 
 def decorate_response(adapter, result, data):
     if adapter._transient_sessions:
-        data["hermes_read_urls"] = read_receipts(result)
+        data["hermes_read_urls"] = result.get("_transient_read_urls", [])
         data["choices"][0]["message"].pop("reasoning_content", None)
 
 
-def read_receipts(result):
-    """Transport evidence of actual web_extract results, never model-claimed citations.
-
-    These certify a fetched body, not its accuracy or support for a claim. A
-    compacted-away result yields no receipt (fail closed at the host).
-    """
-    calls, urls = {}, set()
-    for message in result.get("messages", []):
-        if not isinstance(message, dict):
+def fetched_urls(raw_result):
+    """Parse the raw web_extract completion, before untrusted-data presentation wrapping."""
+    try:
+        payload = json.loads(raw_result)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        return []
+    urls = set()
+    for page in payload["results"]:
+        if not isinstance(page, dict) or page.get("error") or page.get("success") is False:
             continue
-        if message.get("role") == "assistant":
-            for call in message.get("tool_calls") or []:
-                calls[call.get("id")] = call.get("function", {}).get("name")
-        if message.get("role") != "tool" or calls.get(message.get("tool_call_id")) != "web_extract":
-            continue
-        try:
-            payload = json.loads(message.get("content", ""))
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        for page in payload.get("results", []):
-            if not isinstance(page, dict) or page.get("error") or page.get("success") is False:
-                continue
-            url, content = page.get("url", ""), page.get("content", "")
-            if isinstance(url, str) and url.startswith("https://") and isinstance(content, str) and len(content.strip()) >= 80:
-                urls.add(url)
+        url, content = page.get("url", ""), page.get("content", "")
+        if isinstance(url, str) and url.startswith("https://") and isinstance(content, str) and len(content.strip()) >= 80:
+            urls.add(url)
     return sorted(urls)[:20]
+
+
+async def run_completion(adapter, kwargs):
+    """Collect retrieval evidence from real tool completions, not model text/history.
+
+    The turn loop wraps external results and may compact them away. A callback
+    receipt remains valid for this request without persisting the fetched body.
+    """
+    if not adapter._transient_sessions:
+        return await adapter._run_agent(**kwargs)
+    urls, lock = set(), threading.Lock()
+    def completed(call_id, name, args, raw_result):
+        if name == "web_extract":
+            with lock:
+                urls.update(fetched_urls(raw_result))
+    result, usage = await adapter._run_agent(**dict(kwargs, tool_complete_callback=completed))
+    result["_transient_read_urls"] = sorted(urls)[:20]
+    return result, usage

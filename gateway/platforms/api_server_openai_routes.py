@@ -789,7 +789,8 @@ class OpenAICompatRoutesMixin:
                 gateway_session_key=gateway_session_key)
 
         async def _compute_completion():
-            return await self._run_agent(**run_kwargs)
+            from gateway.platforms.api_server_transient import run_completion
+            return await run_completion(self, run_kwargs)
         outcome, err = await self._run_idempotent(
             request, body, _compute_completion, log_label="chat completions",
             fingerprint_keys=["model", "provider", "model_options", "messages", "tools", "tool_choice", "stream",
