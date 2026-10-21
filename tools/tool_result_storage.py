@@ -296,6 +296,9 @@ def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, en
     """Layer 2: persist an oversized result, return preview + path. ``threshold`` overrides
     ``config.resolve_threshold(tool_name)``; falls back to inline truncation when no write
     location succeeds."""
+    from agent.transient_session import is_transient_session
+    if is_transient_session():
+        return content
     if threshold is None:
         threshold = config.resolve_threshold(tool_name)
     if threshold == float("inf") or len(content) <= threshold:

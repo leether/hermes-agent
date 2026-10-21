@@ -291,6 +291,9 @@ def _ensure_web_plugins_loaded() -> None:
 
 def _finish_debug(call_name: str, debug_call_data: dict, error_msg: Optional[str] = None) -> Optional[str]:
     """Log the call into the debug session; with *error_msg*, record it and return its ``tool_error`` envelope."""
+    from agent.transient_session import is_transient_session
+    if is_transient_session():
+        return None if error_msg is None else tool_error("Transient web request failed")
     if error_msg is not None:
         logger.debug("%s", error_msg)
         debug_call_data["error"] = error_msg

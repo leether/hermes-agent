@@ -82,6 +82,9 @@ def validate_tool_calls(
 
     tool_calls = assistant_message.tool_calls
     valid_names = agent.valid_tool_names
+    if getattr(agent, "_transient_session", False):
+        valid_names = set(valid_names) & agent._transient_allowed_tools
+        agent.valid_tool_names = valid_names
 
     def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> ToolValidationVerdict:
         return ToolValidationVerdict(action=action, result=result, mixed_invalid_batch=_mixed_invalid_batch)

@@ -255,7 +255,8 @@ def _is_local_dev_url(url: str) -> bool:
 
 def _cacheable(url: str) -> bool:
     """Extract-cache gate: enabled, not a local-dev host, not user-exempted."""
-    return cache_enabled() and not (_is_local_dev_url(url) or _is_cache_exempt_host(url))
+    from agent.transient_session import is_transient_session
+    return not is_transient_session() and cache_enabled() and not (_is_local_dev_url(url) or _is_cache_exempt_host(url))
 
 
 def extract_cache_get(url: str, format: Optional[str] = None, provider: str = "") -> Optional[dict]:

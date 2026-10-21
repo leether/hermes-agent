@@ -800,7 +800,8 @@ class OpenAICompatRoutesMixin:
             return err
         result, usage = outcome
         presentation_muted = result.get("_notification_presentation_suppressed") is True
-        final_response = _resolve_media_to_data_urls(result.get("final_response") or "")
+        from gateway.platforms.api_server_transient import render_final_text, decorate_response
+        final_response = render_final_text(self, result.get("final_response") or "", _resolve_media_to_data_urls)
         completed, is_partial, is_failed, err_msg = _result_flags(result)
         if err_msg:
             err_msg = _redact_api_error_text(err_msg)
@@ -840,6 +841,7 @@ class OpenAICompatRoutesMixin:
             response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
             if err_msg and not presentation_muted:
                 response_headers["X-Hermes-Error"] = _redact_api_error_text(err_msg, limit=200)
+        decorate_response(self, result, response_data)
         return web.json_response(response_data, headers=response_headers)
 
     async def _run_idempotent(

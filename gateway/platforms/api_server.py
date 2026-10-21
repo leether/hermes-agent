@@ -1195,6 +1195,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.API_SERVER)
         extra = config.extra or {}
+        from gateway.platforms.api_server_transient import configure_adapter
+        configure_adapter(self, extra)
         self._host, self._port = listen_address(extra)
         self._api_key: str = extra.get("key", _get_scoped_secret("API_SERVER_KEY", ""))
         self._cors_origins: tuple[str, ...] = self._parse_cors_origins(
@@ -1906,41 +1908,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 logger.debug("Failed to close API-server SessionDB", exc_info=True)
 
     def _ensure_session_db(self):
-        """SessionDB for the active profile home (the runtime scope redirects ``get_hermes_home()``
-        per profile). Sync, for ``_create_agent``; handlers use ``_ensure_session_db_async``."""
-        if self._session_db is not None:
-            return self._session_db
-        try:
-            from hermes_constants import get_hermes_home
-            return self._open_and_cache_session_db(get_hermes_home())
-        except Exception as e:
-            logger.debug("SessionDB unavailable for API server: %s", e)
-            return None
+        from gateway.platforms.api_server_session_db import _ensure_session_db
+        return _ensure_session_db(self)
 
     async def _ensure_session_db_async(self):
-        """Async variant: the profile home is captured on the loop thread (its scope is invisible
-        inside ``to_thread``), only the blocking open runs in the worker, single-flight locked."""
-        if self._session_db is not None:
-            return self._session_db
-        try:
-            from hermes_constants import get_hermes_home
-            home = get_hermes_home()
-            key = str(home)
-            with self._session_db_cache_lock:
-                cached = self._cached_session_db_locked(key)
-            if cached is not None:
-                return cached
-            if self._session_db_lock is None:
-                self._session_db_lock = asyncio.Lock()
-            async with self._session_db_lock:
-                with self._session_db_cache_lock:
-                    cached = self._cached_session_db_locked(key)
-                if cached is not None:
-                    return cached
-                return await run_profile_thread(self._open_and_cache_session_db, home)
-        except Exception as e:
-            logger.debug("SessionDB unavailable for API server: %s", e)
-            return None
+        from gateway.platforms.api_server_session_db import _ensure_session_db_async
+        return await _ensure_session_db_async(self)
 
     # -- Agent creation ---------------------------------------------------------------
 
@@ -2413,7 +2386,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "memory_manager": self._memory_sessions.checkout(session_id)}
         if request_service_tier is not _REQUEST_OPTION_MISSING:
             agent_kwargs["service_tier"] = request_service_tier
+        from gateway.platforms.api_server_transient import configure_agent_kwargs, bind_agent
+        configure_agent_kwargs(self, agent_kwargs)
         agent = AIAgent(**agent_kwargs)
+        bind_agent(self, agent)
         route_source = (
             "session_model_lock" if confirmed_runtime_lock
             else "session_model_override" if session_override
@@ -4174,7 +4150,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
         def _run():
             from gateway.session_context import clear_session_vars
-            with self._profile_scope(request_profile):
+            from gateway.platforms.api_server_transient import transient_scope
+            with self._profile_scope(request_profile), transient_scope(self._transient_sessions):
                 tokens = self._bind_api_server_session(
                     chat_id=session_id or "", session_key=gateway_session_key or session_id or "",
                     session_id=session_id or "", profile=request_profile or "",
@@ -4430,7 +4407,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 retryable=False)
             return False
         try:
+            from gateway.platforms.api_server_transient import middleware as transient_middleware
             mws = [mw for mw in (
+                transient_middleware(self),
                 self._make_profile_prefix_middleware(), cors_middleware, body_limit_middleware,
                 security_headers_middleware) if mw is not None]
             self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
