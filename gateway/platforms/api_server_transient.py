@@ -34,6 +34,8 @@ def configure_agent_kwargs(adapter, kwargs):
 def bind_agent(adapter, agent, model_options=None):
     if not adapter._transient_sessions:
         return
+    from gateway.platforms.api_server_reasoning_budget import bind_reasoning_budget
+    bind_reasoning_budget(agent, model_options)
     # Set before the first user/tool/summary enters the real turn loop. This also
     # fences the lazy default-state.db recall fallback, not just the main flush.
     agent._transient_session = True
