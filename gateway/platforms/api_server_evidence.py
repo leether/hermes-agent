@@ -32,19 +32,34 @@ def extracted_pages(raw_result):
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             continue
         content = body[:MAX_PAGE_CHARS]
-        pages.append({"url": url, "content": content,
+        receipt = {"url": url, "content": content,
                       "sha256": hashlib.sha256(content.encode()).hexdigest(),
                       "truncated": (len(body) > len(content)
                                     or page.get("truncated") is True
                                     or bool(re.search(r"\[TRUNCATED\].{0,200}Showing \d", body, re.DOTALL))),
-                      "retrieved_at": datetime.now(UTC).isoformat()})
+                      "retrieved_at": datetime.now(UTC).isoformat()}
+        selection_hash = page.get("selection_source_sha256")
+        if isinstance(selection_hash, str) and re.fullmatch(r"[0-9a-f]{64}", selection_hash):
+            receipt["selection_source_sha256"] = selection_hash
+        pages.append(receipt)
     return pages
 
 
 def merge_pages(existing, incoming):
-    """One URL is one receipt; later successful reads replace earlier versions."""
+    """Keep windows of the SAME full source; changed bodies replace earlier versions."""
     by_url = {p["url"]: p for p in existing}
-    by_url.update({p["url"]: p for p in incoming})
+    for page in incoming:
+        previous = by_url.get(page["url"], {})
+        same_source = (page.get("selection_source_sha256")
+                       and page.get("selection_source_sha256") == previous.get("selection_source_sha256"))
+        if same_source and page["content"] in previous["content"]:
+            page = previous
+        elif same_source:
+            joined = previous["content"] + "\n\n[Separate extraction window from identical source hash]\n\n" + page["content"]
+            if len(joined) <= MAX_PAGE_CHARS:
+                page = dict(page, content=joined, sha256=hashlib.sha256(joined.encode()).hexdigest(),
+                            retrieved_at=previous["retrieved_at"], truncated=True)
+        by_url[page["url"]] = page
     kept, size = [], 0
     for page in by_url.values():
         if len(kept) >= MAX_PAGES or size + len(page["content"]) > MAX_TOTAL_CHARS:

@@ -1,6 +1,8 @@
 """Optional verbatim windows from an extracted page, without summarization or disk state."""
 
 import re
+import hashlib
+from itertools import islice
 
 
 def select_passages(content: str, terms: list[str], budget: int) -> str:
@@ -14,7 +16,7 @@ def select_passages(content: str, terms: list[str], budget: int) -> str:
         return content
     header_end = min(4000, budget // 3)
     ranges = [(0, header_end)]
-    found = {term: list(re.finditer(re.escape(term), content, re.IGNORECASE)) for term in terms}
+    found = {term: list(islice(re.finditer(re.escape(term), content, re.IGNORECASE), 3)) for term in terms}
     # Round-robin terms: a common word must not consume the entire window budget.
     for occurrence in range(3):
         for matches in found.values():
@@ -57,8 +59,11 @@ def focus_results(results: list[dict], focus: object, budget: int) -> None:
         content = result.get("raw_content") or result.get("content") or ""
         if _binary_payload_kind(content):
             continue  # Let the established truncation path reject binary payloads.
-        selected = select_passages(convert_base64_images_to_links(content), terms, budget)
+        clean = convert_base64_images_to_links(content)
+        selected = select_passages(clean, terms, budget)
         if selected != content:
             result["content"] = selected
             result.pop("raw_content", None)
             result["truncated"] = True
+            if selected.startswith("[SELECTED PASSAGES;"):
+                result["selection_source_sha256"] = hashlib.sha256(clean.encode()).hexdigest()

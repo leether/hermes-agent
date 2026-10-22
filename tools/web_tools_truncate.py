@@ -192,6 +192,7 @@ def _trim_results(results: list[dict]) -> list[dict]:
             "error": r.get("error"),
             **({"blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
             **({"truncated": True} if r.get("truncated") else {}),
+            **({"selection_source_sha256": r["selection_source_sha256"]} if r.get("selection_source_sha256") else {}),
         }
         for r in results
     ]

@@ -33,6 +33,21 @@ def test_receipt_preserves_upstream_excerpt_truncation():
         assert receipt['content'] == source['content']
 
 
+def test_multiple_passages_keep_earlier_quotes_only_when_full_source_hash_matches():
+    def receipt(body, source_hash):
+        return extracted_pages(json.dumps({'results': [{'url': 'https://example.org/source',
+            'content': body * 10, 'selection_source_sha256': source_hash, 'truncated': True}]}))[0]
+    first = receipt('Early selected paragraph. ', 'a' * 64)
+    second = receipt('Later selected limitation. ', 'a' * 64)
+    combined = merge_pages([first], [second])[0]
+    assert first['content'] in combined['content'] and second['content'] in combined['content']
+    assert combined['sha256'] == hashlib.sha256(combined['content'].encode()).hexdigest()
+    assert combined['retrieved_at'] == first['retrieved_at']
+    assert merge_pages([combined], [first]) == [combined]
+    changed = receipt('A newly revised source document. ', 'b' * 64)
+    assert merge_pages([combined], [changed]) == [changed]
+
+
 @pytest.mark.asyncio
 async def test_each_request_collects_only_real_extract_callbacks_and_normal_is_unchanged():
     async def run(**kwargs):
