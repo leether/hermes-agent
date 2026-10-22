@@ -23,6 +23,16 @@ def test_receipts_reject_failure_and_preserve_exact_bounded_body_hash():
     assert sum(len(p['content']) for p in capped)<=MAX_TOTAL_CHARS
 
 
+def test_receipt_preserves_upstream_excerpt_truncation():
+    body = 'Actual extracted source paragraph. ' * 5
+    for extra in ({'truncated': True}, {'content': body + '\n── [TRUNCATED] ──\nShowing 100 chars (head) + 30 chars (tail) of 5000 total clean characters.'}):
+        source = dict(url='https://example.org/source', content=body)
+        source.update(extra)
+        receipt = extracted_pages(json.dumps({'results': [source]}))[0]
+        assert receipt['truncated'] is True
+        assert receipt['content'] == source['content']
+
+
 @pytest.mark.asyncio
 async def test_each_request_collects_only_real_extract_callbacks_and_normal_is_unchanged():
     async def run(**kwargs):

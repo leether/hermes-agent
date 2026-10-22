@@ -1,6 +1,7 @@
 """Bounded request-local extraction receipts; never model-authored provenance."""
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
@@ -33,7 +34,9 @@ def extracted_pages(raw_result):
         content = body[:MAX_PAGE_CHARS]
         pages.append({"url": url, "content": content,
                       "sha256": hashlib.sha256(content.encode()).hexdigest(),
-                      "truncated": len(body) > len(content),
+                      "truncated": (len(body) > len(content)
+                                    or page.get("truncated") is True
+                                    or bool(re.search(r"\[TRUNCATED\].{0,200}Showing \d", body, re.DOTALL))),
                       "retrieved_at": datetime.now(UTC).isoformat()})
     return pages
 
