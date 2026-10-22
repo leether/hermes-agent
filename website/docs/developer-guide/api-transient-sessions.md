@@ -26,3 +26,18 @@ search-query privacy, authorization, deduplication and final delivery. Deploy
 with a dedicated empty home, no sibling-profile mounts, read-only runtime and
 restricted credentials. This mode is not a general sandbox for arbitrary plugins.
 Native memory-enabled profiles continue to use their existing stores.
+
+## Request-local extraction evidence
+
+Transient health responses also advertise `extraction_evidence: extracted-pages-v1`.
+Chat completion responses include `hermes_evidence` with this schema and `pages`.
+Each page comes exclusively from a successful real `web_extract` completion;
+model text and search snippets cannot create receipts. Fields are `url`, `content`,
+`sha256` (over returned UTF-8 content), `retrieved_at` (UTC), and `truncated`.
+Only HTTPS URLs without credentials are admitted. Each request starts empty;
+later successful reads replace the same URL. Bounds are 12 pages, 200,000
+characters per page and 600,000 total; consumers must fail closed on unavailable
+passages. No additional disk persistence is introduced. Ordinary API mode does
+not expose the envelope. This transport proves extraction, not factual accuracy,
+source authority, version currency or semantic entailment; those remain caller
+responsibilities. The opt-in caller must avoid logging evidence bodies.

@@ -11,6 +11,7 @@ import threading
 
 from aiohttp import web
 from agent.transient_session import transient_scope
+from gateway.platforms.api_server_evidence import SCHEMA, extracted_pages, merge_pages
 
 
 def configure_adapter(adapter, extra):
@@ -87,6 +88,7 @@ def render_final_text(adapter, text, native_resolver):
 def decorate_response(adapter, result, data):
     if adapter._transient_sessions:
         data["hermes_read_urls"] = result.get("_transient_read_urls", [])
+        data["hermes_evidence"] = {"schema": SCHEMA, "pages": result.get("_transient_pages", [])}
         data["choices"][0]["message"].pop("reasoning_content", None)
 
 
@@ -116,11 +118,13 @@ async def run_completion(adapter, kwargs):
     """
     if not adapter._transient_sessions:
         return await adapter._run_agent(**kwargs)
-    urls, lock = set(), threading.Lock()
+    urls, pages, lock = set(), [], threading.Lock()
     def completed(call_id, name, args, raw_result):
         if name == "web_extract":
             with lock:
                 urls.update(fetched_urls(raw_result))
+                pages[:] = merge_pages(pages, extracted_pages(raw_result))
     result, usage = await adapter._run_agent(**dict(kwargs, tool_complete_callback=completed))
     result["_transient_read_urls"] = sorted(urls)[:20]
+    result["_transient_pages"] = pages
     return result, usage

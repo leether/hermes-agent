@@ -12,6 +12,7 @@ async def handle_health(adapter, request: web.Request) -> web.Response:
     from gateway.platforms.api_server import _hermes_version
     return web.json_response({"status": "ok", "platform": "hermes-agent", "version": _hermes_version(),
                               "profile_admission": profile_admission_status(adapter),
+                              "extraction_evidence": "extracted-pages-v1" if getattr(adapter, "_transient_sessions", False) else None,
                               "session_storage": "transient-v1" if getattr(adapter, "_transient_sessions", False) else "native"})
 
 
