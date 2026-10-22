@@ -37,7 +37,10 @@ def _now_ms() -> int:
 class StreamJsonEmitter:
     """Agent-callback sink that writes JSONL events to stdout and flushes each line."""
 
-    def __init__(self, model: str = "", session_id: str = ""):
+    def __init__(self, model: str = "", session_id: str = "", *, origin: dict | None = None, contract: str = "chat-v2"):
+        self._origin = dict(origin or {})
+        self._contract = contract
+        self._result_emitted = False
         self._session_id = session_id
         self._start = time.time()
         self._tool_started: dict[str, float] = {}
@@ -81,23 +84,35 @@ class StreamJsonEmitter:
 
     def emit_result(self, result: Any, session_id: str = "", exit_code: int = 0) -> int:
         """Write the terminal ``result`` record (once) and return the process exit code it reports."""
+        if self._result_emitted:
+            raise RuntimeError("terminal_already_emitted")
+        self._result_emitted = True
         data = result if isinstance(result, dict) else {"final_response": "" if result is None else str(result)}
-        exit_code = exit_code or (1 if data.get("failed") else 0)
+        exit_code = exit_code or (130 if data.get("interrupted") else
+                                  1 if data.get("failed") or data.get("completed") is False else 0)
         payload = {"type": "result", "session_id": session_id or self._session_id, "exit_code": exit_code,
                    "text": data.get("final_response") or "",
                    "tokens": {"input": data.get("input_tokens") or 0, "output": data.get("output_tokens") or 0,
                               "total": data.get("total_tokens") or 0, "cache_read": data.get("cache_read_tokens") or 0,
                               "cache_write": data.get("cache_write_tokens") or 0},
                    "duration_ms": int((time.time() - self._start) * 1000)}
+        payload.update(protocol_version=2, contract=self._contract, origin=self._origin,
+                       completed=data.get("completed"), interrupted=bool(data.get("interrupted", False)),
+                       turn_exit_reason=data.get("turn_exit_reason"), failure_reason=data.get("failure_reason"))
+        for field in ("stage_ms", "vision_attempts", "capabilities", "evidence", "session_persisted"):
+            if field in data: payload[field] = data[field]
         if data.get("error"):
             payload["error"] = str(data["error"])
         self._emit(payload)
         print(f"\nsession_id: {session_id or self._session_id}", file=sys.stderr)  # same stderr contract as -Q
         return exit_code
 
+    def emit_stage(self, stage: str, **metadata) -> None:
+        self._emit({"type": "stage", "stage": stage, **metadata})
+
     def _emit(self, obj: dict) -> None:
         try:
-            sys.stdout.write(json.dumps({**obj, "timestamp": _now_ms()}, ensure_ascii=False) + "\n")
+            sys.stdout.write(json.dumps({**obj, "protocol_version": 2, "contract": self._contract, "origin": self._origin, "timestamp": _now_ms()}, ensure_ascii=False) + "\n")
             sys.stdout.flush()
         except (BrokenPipeError, OSError):
             pass  # consumer closed the pipe — nothing left to report to
