@@ -74,6 +74,8 @@ def middleware(adapter):
                 if response.status >= 400:
                     return web.json_response({"error": {"message": "Transient request failed"}}, status=response.status)
                 return response
+            except web.HTTPException as error:
+                return web.json_response({"error": {"message": "Transient request failed"}}, status=error.status)
             except Exception:
                 # Never reflect provider messages or request bodies into gateway
                 # logs. A caller can retry only under its own delivery contract.
@@ -130,7 +132,8 @@ async def run_completion(adapter, kwargs):
             with lock:
                 urls.update(fetched_urls(raw_result))
                 pages[:] = merge_pages(pages, extracted_pages(raw_result))
-    result, usage = await adapter._run_agent(**dict(kwargs, tool_complete_callback=completed))
+    from gateway.platforms.api_server_deadline import with_deadline
+    result, usage = await with_deadline(adapter, dict(kwargs, tool_complete_callback=completed))
     result["_transient_read_urls"] = sorted(urls)[:20]
     result["_transient_pages"] = pages
     return result, usage

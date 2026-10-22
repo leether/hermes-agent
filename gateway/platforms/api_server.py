@@ -4143,15 +4143,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         as THIS turn's user message instead of being appended a second time
         (``agent.session_persistence.adopt_unanswered_turn``; #115325)."""
         loop = asyncio.get_running_loop()
-        # ContextVars do not follow run_in_executor threads: capture here, re-enter in _run().
+        from gateway.platforms.api_server_deadline import request_scope, execution_scope
+        cancellation_scope = request_scope()
         request_profile = _api_request_profile.get()
         request_browser_control_principal = _api_request_browser_control_principal.get()
         request_browser_control_transport_family = _api_request_browser_control_transport_family.get()
 
         def _run():
             from gateway.session_context import clear_session_vars
-            from gateway.platforms.api_server_transient import transient_scope
-            with self._profile_scope(request_profile), transient_scope(self._transient_sessions):
+            with self._profile_scope(request_profile), execution_scope(self._transient_sessions, cancellation_scope):
                 tokens = self._bind_api_server_session(
                     chat_id=session_id or "", session_key=gateway_session_key or session_id or "",
                     session_id=session_id or "", profile=request_profile or "",
