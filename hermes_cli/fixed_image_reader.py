@@ -161,8 +161,16 @@ async def read_once(req, *, vision=None, store=None):
         result.update(turn_exit_reason='reader_failed', failure_reason=reason[:96])
     try:
         t = time.monotonic()
-        db.append_message(sid, 'assistant', json.dumps(result, ensure_ascii=False), finish_reason=result['turn_exit_reason'])
+        terminal_body = json.dumps(result, ensure_ascii=False)
+        db.append_message(sid, 'assistant', terminal_body, finish_reason=result['turn_exit_reason'])
         db.end_session(sid, result['turn_exit_reason'])
+        saved, messages = db.get_session(sid), db.get_messages(sid)
+        if (not saved or saved.get('ended_at') is None
+                or saved.get('end_reason') != result['turn_exit_reason']
+                or json.loads(saved.get('origin_json') or '{}') != origin
+                or len(messages) != 2 or messages[-1]['role'] != 'assistant'
+                or messages[-1]['content'] != terminal_body):
+            raise EvidenceError('session_readback_mismatch')
         stages['persist'] = round((time.monotonic() - t) * 1000)
         result['session_persisted'] = True
     except Exception:  # health: allow BLE001 -- storage boundary emits persistence_failed and never claims a durable terminal

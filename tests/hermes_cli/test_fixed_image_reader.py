@@ -150,3 +150,20 @@ def test_unsupported_signal_loop_never_starts_reader(tmp_path,monkeypatch):
         with pytest.raises(reader.EvidenceError,match='signal_cancellation_unsupported'):
             await reader.run(request(tmp_path))
     asyncio.run(scenario());provider.assert_not_called()
+
+
+@pytest.mark.parametrize('missing',['message','end'])
+def test_silent_incomplete_storage_cannot_claim_persistence(tmp_path,monkeypatch,capsys,missing):
+    req=request(tmp_path);db=SessionDB(db_path=tmp_path/'state.db')
+    if missing=='end':monkeypatch.setattr(db,'end_session',lambda *_:None)
+    else:
+        original=db.append_message
+        def append(sid,role,*args,**kw):
+            return original(sid,role,*args,**kw) if role=='user' else 0
+        monkeypatch.setattr(db,'append_message',append)
+    vision=AsyncMock(return_value={'description':'fixture','ocr':'','uncertainty':''})
+    assert asyncio.run(reader.read_once(req,vision=vision,store=db))==1
+    terminal=json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert terminal['session_persisted'] is False and terminal['completed'] is False
+    assert terminal['evidence'] is None and terminal['turn_exit_reason']=='persistence_failed'
+    db.close()
