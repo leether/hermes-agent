@@ -2389,7 +2389,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         from gateway.platforms.api_server_transient import configure_agent_kwargs, bind_agent
         configure_agent_kwargs(self, agent_kwargs)
         agent = AIAgent(**agent_kwargs)
-        bind_agent(self, agent)
+        bind_agent(self, agent, model_options)
         route_source = (
             "session_model_lock" if confirmed_runtime_lock
             else "session_model_override" if session_override

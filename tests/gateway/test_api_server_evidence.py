@@ -33,6 +33,21 @@ def test_receipt_preserves_upstream_excerpt_truncation():
         assert receipt['content'] == source['content']
 
 
+def test_quote_refs_require_matching_body_and_hash_and_drop_after_revision():
+    quote = 'A literal source statement with sufficient context.'
+    absent = 'A forged statement absent from the extracted source.'
+    ref = lambda text: '@s' + hashlib.sha256(text.encode()).hexdigest()[:20]
+    def receipt(body, spans, digest):
+        return extracted_pages(json.dumps({'results': [{
+            'url': 'https://example.org/source', 'content': body * 4,
+            'quote_spans': spans, 'selection_source_sha256': digest}]}))[0]
+    first = receipt(quote, {ref(quote): quote, ref(absent): absent, '@s' + '0' * 20: quote}, 'a' * 64)
+    assert first['quote_spans'] == {ref(quote): quote}
+    changed = receipt(absent, {ref(quote): quote, ref(absent): absent}, 'b' * 64)
+    merged = merge_pages([first], [changed])[0]
+    assert merged['quote_spans'] == {ref(absent): absent}
+
+
 def test_multiple_passages_keep_earlier_quotes_only_when_full_source_hash_matches():
     def receipt(body, source_hash):
         return extracted_pages(json.dumps({'results': [{'url': 'https://example.org/source',

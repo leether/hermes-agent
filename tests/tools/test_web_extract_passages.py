@@ -46,6 +46,9 @@ def test_real_tool_chain_selects_middle_marks_receipt_and_keeps_no_focus_behavio
         normal = asyncio.run(web.web_extract_tool([url], char_limit=14000))
     assert "EXACT CHAPTER. Limitation nearby." in json.loads(focused)["results"][0]["content"]
     assert extracted_pages(focused)[0]["truncated"] is True
+    spans = extracted_pages(focused)[0]["quote_spans"]
+    assert spans and any("EXACT CHAPTER. Limitation nearby." in quote for quote in spans.values())
+    assert not json.loads(normal)["results"][0].get("quote_spans")
     assert "SELECTED PASSAGES" not in normal
 
 

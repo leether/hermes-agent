@@ -444,6 +444,8 @@ async def web_extract_tool(urls: list[Any], format: str | None = None, char_limi
         limit = _effective_char_limit(char_limit)
         focus_results(results, focus, max(2000, limit - 1000))
         _truncate_results(results, limit, debug_call_data)
+        from tools.web_extract_quotes import attach_quote_spans
+        attach_quote_spans(results, focus)
         trimmed = _trim_results(results)
         result_json = (
             json.dumps({"results": trimmed}, indent=2, ensure_ascii=False) if trimmed

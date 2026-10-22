@@ -31,18 +31,19 @@ def configure_agent_kwargs(adapter, kwargs):
                   skip_background_review=True, enabled_toolsets=["web"])
 
 
-def bind_agent(adapter, agent):
+def bind_agent(adapter, agent, model_options=None):
     if not adapter._transient_sessions:
         return
     # Set before the first user/tool/summary enters the real turn loop. This also
     # fences the lazy default-state.db recall fallback, not just the main flush.
     agent._transient_session = True
-    agent._transient_allowed_tools = frozenset(adapter._transient_allowed_tools)
+    allowed = (frozenset() if isinstance(model_options, dict) and model_options.get("tool_choice") == "none"
+               else frozenset(adapter._transient_allowed_tools))
+    agent._transient_allowed_tools = allowed
     agent._persist_disabled = True
     agent._session_db = None
     agent.save_trajectories = False
     agent.suppress_status_output = True
-    allowed = frozenset(adapter._transient_allowed_tools)
     agent.tools = [tool for tool in agent.tools if tool.get("function", {}).get("name") in allowed]
     agent.valid_tool_names = {tool["function"]["name"] for tool in agent.tools}
 

@@ -24,7 +24,7 @@ def adapter(tmp_path, monkeypatch):
         "transient_allowed_tools": ["web_search", "web_extract"]}))
 
 
-def make_real_agent(adapter, monkeypatch):
+def make_real_agent(adapter, monkeypatch, model_options=None):
     cfg = {"memory": {"memory_enabled": False, "user_profile_enabled": False},
            "checkpoints": {"enabled": False}, "agent": {},
            "compression": {"enabled": True, "threshold": .5, "target_ratio": .2},
@@ -51,7 +51,7 @@ def make_real_agent(adapter, monkeypatch):
         usage={"prompt_tokens": 30, "completion_tokens": 12, "total_tokens": 42})
     monkeypatch.setattr("agent.process_bootstrap.OpenAI", lambda **kwargs: client)
     with transient_scope(True):
-        agent = adapter._create_agent(ephemeral_system_prompt=SENTINEL, session_id="transient-test")
+        agent = adapter._create_agent(ephemeral_system_prompt=SENTINEL, session_id="transient-test", model_options=model_options)
     return agent
 
 
@@ -102,6 +102,7 @@ async def test_transient_http_route_denies_resume_and_other_profile_apis(adapter
 async def test_health_advertises_storage_contract_and_fresh_profile_cannot_resume(adapter):
     response = await adapter._handle_health(SimpleNamespace())
     assert json.loads(response.body)["session_storage"] == "transient-v1"
+    assert json.loads(response.body)["transient_tool_choice"] == "none-v1"
     assert await adapter._ensure_session_db_async() is None
 
 

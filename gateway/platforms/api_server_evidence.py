@@ -11,6 +11,16 @@ MAX_TOTAL_CHARS = 600000
 MAX_PAGES = 12
 
 
+def checked_spans(page, content):
+    body = re.sub(r"\s+", " ", content).strip()
+    values = page.get("quote_spans", {})
+    if not isinstance(values, dict):
+        return {}
+    return {key: value for key, value in list(values.items())[:48]
+            if isinstance(value, str) and 20 <= len(value) <= 600 and value in body
+            and key == "@s" + hashlib.sha256(value.encode()).hexdigest()[:20]}
+
+
 def extracted_pages(raw_result):
     try:
         payload = json.loads(raw_result)
@@ -41,6 +51,7 @@ def extracted_pages(raw_result):
         selection_hash = page.get("selection_source_sha256")
         if isinstance(selection_hash, str) and re.fullmatch(r"[0-9a-f]{64}", selection_hash):
             receipt["selection_source_sha256"] = selection_hash
+        receipt["quote_spans"] = checked_spans(page, content)
         pages.append(receipt)
     return pages
 
@@ -53,12 +64,15 @@ def merge_pages(existing, incoming):
         same_source = (page.get("selection_source_sha256")
                        and page.get("selection_source_sha256") == previous.get("selection_source_sha256"))
         if same_source and page["content"] in previous["content"]:
-            page = previous
+            page = dict(previous, quote_spans=checked_spans({"quote_spans": {
+                **previous.get("quote_spans", {}), **page.get("quote_spans", {})}}, previous["content"]))
         elif same_source:
             joined = previous["content"] + "\n\n[Separate extraction window from identical source hash]\n\n" + page["content"]
             if len(joined) <= MAX_PAGE_CHARS:
                 page = dict(page, content=joined, sha256=hashlib.sha256(joined.encode()).hexdigest(),
-                            retrieved_at=previous["retrieved_at"], truncated=True)
+                            retrieved_at=previous["retrieved_at"], truncated=True,
+                            quote_spans=checked_spans({"quote_spans": {
+                                **previous.get("quote_spans", {}), **page.get("quote_spans", {})}}, joined))
         by_url[page["url"]] = page
     kept, size = [], 0
     for page in by_url.values():
