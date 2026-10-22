@@ -191,6 +191,7 @@ def _trim_results(results: list[dict]) -> list[dict]:
             "url": r.get("url", ""), "title": r.get("title", ""), "content": r.get("content", ""),
             "error": r.get("error"),
             **({"blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
+            **({"truncated": True} if r.get("truncated") else {}),
         }
         for r in results
     ]
