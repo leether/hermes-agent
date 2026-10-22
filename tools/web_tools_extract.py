@@ -25,6 +25,33 @@ _INVALID_ITEM_ERROR = (
 )
 
 
+def _extract_argument_urls(args):
+    """Normalize model dialects only in opt-in transient calls; validation follows.
+
+    The public schema remains ``urls: array``. Some models emit ``url`` or a
+    JSON-encoded array despite that schema. Do not turn these into empty fetches
+    and consume a whole reasoning loop. No safety or provider gate is skipped.
+    """
+    value = args.get("urls")
+    if isinstance(value, list):
+        return value[:5]
+    from agent.transient_session import is_transient_session
+    if not is_transient_session():
+        return []
+    value = args.get("urls", args.get("url"))
+    if isinstance(value, str):
+        if len(value) > 10000:
+            return []
+        if value.lstrip().startswith("["):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                return []
+        else:
+            value = [value]
+    return value[:5] if isinstance(value, list) else []
+
+
 def _web_extract_url(value: Any) -> Optional[str]:
     """URL from a model-supplied extract item (str, or dict with ``url``/``href``); None if unusable.
 

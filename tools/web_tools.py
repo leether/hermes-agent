@@ -24,7 +24,7 @@ from tools.web_tools_rescue import _managed_search_fallback, _rescue_eligible, _
 from tools.web_tools_truncate import _effective_char_limit, _trim_results, _truncate_results, convert_base64_images_to_links
 from tools.web_tools_extract import (
     _extract_safe_urls, _merge_in_order, _no_provider_error, _resolve_extract_provider, _result_entry,
-    _strict_selection_error, _validate_extract_urls,
+    _strict_selection_error, _validate_extract_urls, _extract_argument_urls,
 )
 
 logger = logging.getLogger(__name__)
@@ -578,7 +578,7 @@ registry.register(
 registry.register(
     name="web_extract", toolset="web", schema=WEB_EXTRACT_SCHEMA,
     handler=lambda args, **kw: web_extract_tool(
-        args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown",
+        _extract_argument_urls(args), "markdown",
         char_limit=args.get("char_limit"),
         focus=args.get("focus"),
     ),
