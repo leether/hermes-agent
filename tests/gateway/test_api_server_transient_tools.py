@@ -11,7 +11,7 @@ make_real_agent = fixtures.make_real_agent
 
 
 def test_request_without_tools_cannot_execute_even_model_requested_web(adapter, monkeypatch):
-    agent = make_real_agent(adapter, monkeypatch, {"tool_choice": "none"})
+    agent = make_real_agent(adapter, monkeypatch, {"tool_choice": "none", "response_format": {"type": "json_object"}})
     assert not agent.tools and not agent.valid_tool_names
     final = agent.client.chat.completions.create.return_value
     agent.client.chat.completions.create.side_effect = [ChatCompletion(
@@ -26,6 +26,9 @@ def test_request_without_tools_cannot_execute_even_model_requested_web(adapter, 
         result = agent.run_conversation("Review supplied synthetic evidence only", conversation_history=[])
         agent.close()
     assert result["completed"] and executed == [] and not agent.valid_tool_names
+    for call in agent.client.chat.completions.create.call_args_list:
+        assert call.kwargs['response_format'] == {'type': 'json_object'}
     other = make_real_agent(adapter, monkeypatch)
     assert other.valid_tool_names == {"web_search", "web_extract"}
+    assert 'response_format' not in other.request_overrides
     other.close()

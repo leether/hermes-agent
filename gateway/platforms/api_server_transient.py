@@ -46,6 +46,9 @@ def bind_agent(adapter, agent, model_options=None):
     agent.suppress_status_output = True
     agent.tools = [tool for tool in agent.tools if tool.get("function", {}).get("name") in allowed]
     agent.valid_tool_names = {tool["function"]["name"] for tool in agent.tools}
+    if isinstance(model_options, dict) and model_options.get("response_format") == {"type": "json_object"}:
+        agent.request_overrides = dict(getattr(agent, "request_overrides", {}) or {},
+                                       response_format={"type": "json_object"})
 
 
 def middleware(adapter):
