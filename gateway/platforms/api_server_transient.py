@@ -99,6 +99,8 @@ def decorate_response(adapter, result, data):
     if adapter._transient_sessions:
         data["hermes_read_urls"] = result.get("_transient_read_urls", [])
         data["hermes_evidence"] = {"schema": SCHEMA, "pages": result.get("_transient_pages", [])}
+        if result.get('_collection_status'):
+            data['hermes_collection_status'] = result['_collection_status']
         data["choices"][0]["message"].pop("reasoning_content", None)
 
 
@@ -129,13 +131,19 @@ async def run_completion(adapter, kwargs):
     if not adapter._transient_sessions:
         return await adapter._run_agent(**kwargs)
     urls, pages, lock = set(), [], threading.Lock()
+    closed = False
     def completed(call_id, name, args, raw_result):
         if name == "web_extract":
             with lock:
-                urls.update(fetched_urls(raw_result))
-                pages[:] = merge_pages(pages, extracted_pages(raw_result))
-    from gateway.platforms.api_server_deadline import with_deadline
-    result, usage = await with_deadline(adapter, dict(kwargs, tool_complete_callback=completed))
+                if not closed:
+                    urls.update(fetched_urls(raw_result))
+                    pages[:] = merge_pages(pages, extracted_pages(raw_result))
+    from gateway.platforms.api_server_collection_budget import collect
+    try:
+        result, usage = await collect(adapter, dict(kwargs, tool_complete_callback=completed))
+    finally:
+        with lock:
+            closed = True
     result["_transient_read_urls"] = sorted(urls)[:20]
-    result["_transient_pages"] = pages
+    result["_transient_pages"] = list(pages)
     return result, usage

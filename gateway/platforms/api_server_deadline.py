@@ -11,6 +11,10 @@ from agent.transient_session import transient_scope
 _scope = ContextVar("transient_request_interrupt_scope", default=None)
 
 
+class RequestDeadlineExpired(web.HTTPGatewayTimeout):
+    """Identifies this host timer, rather than an arbitrary upstream 504."""
+
+
 def request_scope():
     return _scope.get()
 
@@ -41,7 +45,7 @@ async def with_deadline(adapter, kwargs):
         task.add_done_callback(_consume_result)
         if isinstance(error, asyncio.CancelledError):
             raise
-        raise web.HTTPGatewayTimeout(text="Transient request deadline exceeded") from None
+        raise RequestDeadlineExpired(text="Transient request deadline exceeded") from None
     finally:
         _scope.reset(token)
 

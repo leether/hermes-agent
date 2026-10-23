@@ -17,6 +17,7 @@ async def handle_health(adapter, request: web.Request) -> web.Response:
                               "transient_response_format": "json-object-v1" if getattr(adapter, "_transient_sessions", False) else None,
                               "transient_thinking_budget": "qwen-budget-v1" if getattr(adapter, "_transient_sessions", False) else None,
                               "transient_deadline": "interrupt-scope-v1" if getattr(adapter, "_transient_sessions", False) else None,
+                              "transient_collection_budget": "receipts-only-v1" if getattr(adapter, "_transient_sessions", False) else None,
                               "transient_json_schema": "json-schema-v1" if getattr(adapter, "_transient_sessions", False) else None,
                               "session_storage": "transient-v1" if getattr(adapter, "_transient_sessions", False) else "native"})
 

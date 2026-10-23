@@ -41,3 +41,9 @@ passages. No additional disk persistence is introduced. Ordinary API mode does
 not expose the envelope. This transport proves extraction, not factual accuracy,
 source authority, version currency or semantic entailment; those remain caller
 responsibilities. The opt-in caller must avoid logging evidence bodies.
+
+## Bounded evidence collection
+
+Transient clients may opt into `model_options.evidence_collection_seconds`, strictly below their existing `wall_timeout_seconds` (at most 200 seconds). Health advertises `transient_collection_budget: receipts-only-v1`. This reserves time for the caller's later processing; it does not extend the wall deadline or change ordinary requests.
+
+On this stage timer's expiry the native interrupt scope stops the worker. The response is explicitly partial, has `hermes_collection_status: budget_exhausted`, an empty JSON object instead of any interrupted draft, and only already-completed tool receipts. The receipt collector then closes to late callbacks. A normal completion has collection status `completed`. Cancellation, provider errors and non-stage timeouts remain failures. Clients must treat receipts as evidence inputs requiring their own validation, never as a completed answer; interrupted draft text is never recoverable through this mode.
