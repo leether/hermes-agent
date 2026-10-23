@@ -24,7 +24,7 @@ from tools.web_tools_rescue import _managed_search_fallback, _rescue_eligible, _
 from tools.web_tools_truncate import _effective_char_limit, _trim_results, _truncate_results, convert_base64_images_to_links
 from tools.web_tools_extract import (
     _extract_safe_urls, _merge_in_order, _no_provider_error, _resolve_extract_provider, _result_entry,
-    _strict_selection_error, _validate_extract_urls,
+    _strict_selection_error, _validate_extract_urls, _extract_argument_urls,
 )
 
 logger = logging.getLogger(__name__)
@@ -291,6 +291,9 @@ def _ensure_web_plugins_loaded() -> None:
 
 def _finish_debug(call_name: str, debug_call_data: dict, error_msg: Optional[str] = None) -> Optional[str]:
     """Log the call into the debug session; with *error_msg*, record it and return its ``tool_error`` envelope."""
+    from agent.transient_session import is_transient_session
+    if is_transient_session():
+        return None if error_msg is None else tool_error("Transient web request failed")
     if error_msg is not None:
         logger.debug("%s", error_msg)
         debug_call_data["error"] = error_msg
@@ -389,7 +392,8 @@ def _memoized_search(provider, query: str, limit: int) -> dict:
     return slice_search_response(response_data, limit)
 
 
-async def web_extract_tool(urls: list[Any], format: str | None = None, char_limit: Optional[int] = None) -> str:
+async def web_extract_tool(urls: list[Any], format: str | None = None, char_limit: Optional[int] = None,
+                           focus: Optional[list[str]] = None) -> str:
     """Extract clean page content (no LLM) from URLs via the configured backend.
 
     Pages over ``char_limit`` (default web.extract_char_limit or 15000) are head+tail truncated with a footer
@@ -436,7 +440,13 @@ async def web_extract_tool(urls: list[Any], format: str | None = None, char_limi
         debug_call_data["pages_extracted"] = len(results)
         debug_call_data["original_response_size"] = len(json.dumps({"results": results}))
         debug_call_data["processing_applied"].append("truncate_and_store")
-        _truncate_results(results, _effective_char_limit(char_limit), debug_call_data)
+        from tools.web_extract_passages import focus_results, stamp_transient_sources
+        limit = _effective_char_limit(char_limit)
+        stamp_transient_sources(results)
+        focus_results(results, focus, max(2000, limit - 1000))
+        _truncate_results(results, limit, debug_call_data)
+        from tools.web_extract_quotes import attach_quote_spans
+        attach_quote_spans(results, focus)
         trimmed = _trim_results(results)
         result_json = (
             json.dumps({"results": trimmed}, indent=2, ensure_ascii=False) if trimmed
@@ -550,6 +560,10 @@ WEB_EXTRACT_SCHEMA = {
                 "type": "integer",
                 "description": "Optional per-page character budget sent back (default 15000). Pages larger than this are head+tail truncated with the full text stored to disk. Raise it when you need more of a long page inline.",
                 "minimum": 2000
+            },
+            "focus": {
+                "type": "array", "items": {"type": "string"}, "maxItems": 8,
+                "description": "Optional literal phrases to locate in a long extracted page/PDF. Returns its header plus verbatim matching passages with surrounding context and explicit omissions, within char_limit. Use precise original-language phrases, refine if missing. This is selected evidence, not a complete document or an LLM summary."
             }
         },
         "required": ["urls"]
@@ -565,8 +579,9 @@ registry.register(
 registry.register(
     name="web_extract", toolset="web", schema=WEB_EXTRACT_SCHEMA,
     handler=lambda args, **kw: web_extract_tool(
-        args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown",
+        _extract_argument_urls(args), "markdown",
         char_limit=args.get("char_limit"),
+        focus=args.get("focus"),
     ),
     check_fn=check_web_api_key, requires_env=_web_requires_env(), is_async=True, emoji="📄",
     max_result_size_chars=100_000,

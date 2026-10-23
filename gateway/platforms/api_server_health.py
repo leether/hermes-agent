@@ -11,7 +11,15 @@ async def handle_health(adapter, request: web.Request) -> web.Response:
     """GET /health — simple health check."""
     from gateway.platforms.api_server import _hermes_version
     return web.json_response({"status": "ok", "platform": "hermes-agent", "version": _hermes_version(),
-                              "profile_admission": profile_admission_status(adapter)})
+                              "profile_admission": profile_admission_status(adapter),
+                              "extraction_evidence": "extracted-pages-v1" if getattr(adapter, "_transient_sessions", False) else None,
+                              "transient_tool_choice": "none-v1" if getattr(adapter, "_transient_sessions", False) else None,
+                              "transient_response_format": "json-object-v1" if getattr(adapter, "_transient_sessions", False) else None,
+                              "transient_thinking_budget": "qwen-budget-v1" if getattr(adapter, "_transient_sessions", False) else None,
+                              "transient_deadline": "interrupt-scope-v1" if getattr(adapter, "_transient_sessions", False) else None,
+                              "transient_collection_budget": "receipts-only-v1" if getattr(adapter, "_transient_sessions", False) else None,
+                              "transient_json_schema": "json-schema-v1" if getattr(adapter, "_transient_sessions", False) else None,
+                              "session_storage": "transient-v1" if getattr(adapter, "_transient_sessions", False) else "native"})
 
 
 async def handle_health_detailed(adapter, request: web.Request) -> web.Response:
