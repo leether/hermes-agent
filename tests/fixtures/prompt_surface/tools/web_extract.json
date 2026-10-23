@@ -8,6 +8,14 @@
         "minimum": 2000,
         "type": "integer"
       },
+      "focus": {
+        "description": "Optional literal phrases to locate in a long extracted page/PDF. Returns its header plus verbatim matching passages with surrounding context and explicit omissions, within char_limit. Use precise original-language phrases, refine if missing. This is selected evidence, not a complete document or an LLM summary.",
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 8,
+        "type": "array"
+      },
       "urls": {
         "description": "List of URLs to extract content from (max 5 URLs per call)",
         "items": {
