@@ -123,7 +123,9 @@ test('test-only source probe pins staged main without changing other Python invo
   expect(sourceBranchProbe.branchProbeArgs(cmd, root, '/real&git')).toBe(cmd)
 })
 
-test.skipIf(process.platform === 'win32')('probe Git reaches the staged main even with global Git config isolated', () => {
+// Real Git and Python child processes exceed the 5s unit-test default on busy CI.
+// Keep a bounded integration-test budget without changing any isolation assertions.
+test.skipIf(process.platform === 'win32')('probe Git reaches the staged main even with global Git config isolated', { timeout: 15_000 }, () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-staged-git-'))
   const git = process.env.HERMES_E2E_REAL_GIT || process.env.PATH.split(path.delimiter)
     .map(dir => path.join(dir, process.platform === 'win32' ? 'git.exe' : 'git')).find(file => fs.existsSync(file))
