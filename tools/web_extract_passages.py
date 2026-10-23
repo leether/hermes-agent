@@ -5,6 +5,20 @@ import hashlib
 from itertools import islice
 
 
+def stamp_transient_sources(results: list[dict]) -> None:
+    """Bind every transient window to the actual body before any truncation."""
+    from agent.transient_session import is_transient_session
+    if not is_transient_session():
+        return
+    from tools.web_tools_truncate import _binary_payload_kind, convert_base64_images_to_links
+    for page in results:
+        content = page.get("raw_content") or page.get("content") or ""
+        if page.get("error") or not isinstance(content, str) or not content or _binary_payload_kind(content):
+            continue
+        clean = convert_base64_images_to_links(content)
+        page["selection_source_sha256"] = hashlib.sha256(clean.encode()).hexdigest()
+
+
 def select_passages(content: str, terms: list[str], budget: int) -> str:
     """Keep the header and bounded, labelled context around literal matches.
 
@@ -16,7 +30,10 @@ def select_passages(content: str, terms: list[str], budget: int) -> str:
         return content
     header_end = min(4000, budget // 3)
     ranges = [(0, header_end)]
-    found = {term: list(islice(re.finditer(re.escape(term), content, re.IGNORECASE), 3)) for term in terms}
+    # Match whitespace variants without normalizing the returned source bytes
+    # or offsets. Punctuation remains literal, never a caller-provided regex.
+    found = {term: list(islice(re.finditer(r"\s+".join(re.escape(part) for part in term.split()),
+                                         content, re.IGNORECASE), 3)) for term in terms}
     # Round-robin terms: a common word must not consume the entire window budget.
     for occurrence in range(3):
         for matches in found.values():

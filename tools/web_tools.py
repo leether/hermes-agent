@@ -440,8 +440,9 @@ async def web_extract_tool(urls: list[Any], format: str | None = None, char_limi
         debug_call_data["pages_extracted"] = len(results)
         debug_call_data["original_response_size"] = len(json.dumps({"results": results}))
         debug_call_data["processing_applied"].append("truncate_and_store")
-        from tools.web_extract_passages import focus_results
+        from tools.web_extract_passages import focus_results, stamp_transient_sources
         limit = _effective_char_limit(char_limit)
+        stamp_transient_sources(results)
         focus_results(results, focus, max(2000, limit - 1000))
         _truncate_results(results, limit, debug_call_data)
         from tools.web_extract_quotes import attach_quote_spans
